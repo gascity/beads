@@ -179,9 +179,10 @@ func resolveCommandBeadsDir(dbPath string) string {
 }
 
 // getActorWithGit returns the actor for audit trails with git config fallback.
-// Priority: --actor flag > BEADS_ACTOR env > BD_ACTOR env (deprecated) > git config user.name > $USER > "unknown"
+// Priority: --actor flag > BEADS_ACTOR env > GC_SESSION_ID env > BD_ACTOR env (deprecated) > git config user.name > $USER > "unknown"
 // This provides a sensible default for developers: their git identity is used unless
-// explicitly overridden
+// explicitly overridden. GC_SESSION_ID is set by the Gas City reconciler and contains
+// the session bead ID (e.g., mc-fom) for traceability.
 func getActorWithGit() string {
 	// If actor is already set (from --actor flag), use it
 	if actor != "" {
@@ -191,6 +192,11 @@ func getActorWithGit() string {
 	// Check BEADS_ACTOR env var (primary env override)
 	if beadsActor := os.Getenv("BEADS_ACTOR"); beadsActor != "" {
 		return beadsActor
+	}
+
+	// Check GC_SESSION_ID env var (set by GC reconciler to session bead ID)
+	if sessionID := os.Getenv("GC_SESSION_ID"); sessionID != "" {
+		return sessionID
 	}
 
 	// Check BD_ACTOR env var (deprecated alias, kept for backwards compatibility)
