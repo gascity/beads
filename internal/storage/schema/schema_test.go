@@ -406,6 +406,36 @@ func TestCLICompatibleMigration0049UsesDirectLongtextDDL(t *testing.T) {
 	}
 }
 
+func TestMigration0054ReadyWorkIndexesUseCurrentSchema(t *testing.T) {
+	upSQL, err := os.ReadFile("migrations/0054_ready_work_indexes.up.sql")
+	if err != nil {
+		t.Fatalf("read 0054 up migration: %v", err)
+	}
+	body := string(upSQL)
+	for _, want := range []string{
+		"CREATE INDEX idx_dependencies_type_issue_target ON dependencies (type, issue_id, depends_on_issue_id)",
+		"CREATE INDEX idx_issues_ready_assignee ON issues (assignee, status, priority, created_at, id)",
+		"CREATE INDEX idx_issues_ready_status ON issues (status, priority, created_at, id)",
+		"CREATE INDEX idx_issues_defer_until ON issues (defer_until)",
+		"CREATE INDEX idx_wisp_dependencies_type_issue_target ON wisp_dependencies (type, issue_id, depends_on_issue_id)",
+		"CREATE INDEX idx_wisps_ready_assignee ON wisps (assignee, status, priority, created_at, id)",
+		"CREATE INDEX idx_wisps_ready_status ON wisps (status, priority, created_at, id)",
+		"CREATE INDEX idx_wisps_defer_until ON wisps (defer_until)",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("0054 migration missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"idx_dependencies_type_issue_depends",
+		"depends_on_id)",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("0054 migration contains stale dependency index marker %q", forbidden)
+		}
+	}
+}
+
 func TestCLICompatibleMigration0039PreservesRuntimeChildCountersFK(t *testing.T) {
 	got := cliCompatibleMigrationSQL("0039_drop_child_counters_fk.up.sql", "source migration")
 	if strings.TrimSpace(got) != "SELECT 1;" {

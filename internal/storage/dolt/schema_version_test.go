@@ -161,8 +161,13 @@ func TestMigration0053PromotesRigWisps(t *testing.T) {
 		t.Fatalf("commit seed fixture: %v", err)
 	}
 
-	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
-		t.Fatalf("mark 0053 pending: %v", err)
+	// MigrateUp resumes from MAX(version) in schema_migrations, so to replay the
+	// rig-repair migration (0053) we clear it and every migration stacked above
+	// it (e.g. the 0054 ready-work indexes, which re-apply idempotently).
+	// Deleting only LatestVersion() would skip 0053 once later migrations exist.
+	const rigRepairVersion = 53
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= ?", rigRepairVersion); err != nil {
+		t.Fatalf("mark rig-repair migration (0053) pending: %v", err)
 	}
 	if _, err := schema.MigrateUp(ctx, store.db); err != nil {
 		t.Fatalf("MigrateUp: %v", err)
