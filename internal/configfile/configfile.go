@@ -25,15 +25,20 @@ type Config struct {
 	// Dolt connection mode configuration (bd-dolt.2.2)
 	// "embedded" (default for standalone) runs Dolt in-process.
 	// "server" connects to an external dolt sql-server (required for orchestrator / multi-writer).
-	DoltMode           string `json:"dolt_mode,omitempty"`            // "embedded" (default) or "server"
-	DoltServerHost     string `json:"dolt_server_host,omitempty"`     // Server host (default: 127.0.0.1)
-	DoltServerPort     int    `json:"dolt_server_port,omitempty"`     // Server port (default: 3307)
-	DoltServerSocket   string `json:"dolt_server_socket,omitempty"`   // Unix domain socket path (overrides host/port)
-	DoltServerUser     string `json:"dolt_server_user,omitempty"`     // MySQL user (default: root)
-	DoltDatabase       string `json:"dolt_database,omitempty"`        // SQL database name (default: beads)
-	DoltServerTLS      bool   `json:"dolt_server_tls,omitempty"`      // Enable TLS for server connections (required for Hosted Dolt)
-	DoltDataDir        string `json:"dolt_data_dir,omitempty"`        // Custom dolt data directory (absolute path; default: .beads/dolt)
-	DoltRemotesAPIPort int    `json:"dolt_remotesapi_port,omitempty"` // Dolt remotesapi port for federation (default: 8080)
+	DoltMode         string `json:"dolt_mode,omitempty"`          // "embedded" (default) or "server"
+	DoltServerHost   string `json:"dolt_server_host,omitempty"`   // Server host (default: 127.0.0.1)
+	DoltServerPort   int    `json:"dolt_server_port,omitempty"`   // Server port (default: 3307)
+	DoltServerSocket string `json:"dolt_server_socket,omitempty"` // Unix domain socket path (overrides host/port)
+	DoltServerUser   string `json:"dolt_server_user,omitempty"`   // MySQL user (default: root)
+	// DoltCredentialCommand, when set, is run to obtain a short-lived server-mode credential
+	// (a bearer token presented as the MySQL username) — the vendor-neutral credential-helper
+	// hook (kubectl ExecCredential / AWS credential_process idiom). bd knows nothing of the
+	// issuer; a hosted deployment points it at e.g. `gasworks getToken beads --org <org>`.
+	DoltCredentialCommand string `json:"dolt_credential_command,omitempty"`
+	DoltDatabase          string `json:"dolt_database,omitempty"`        // SQL database name (default: beads)
+	DoltServerTLS         bool   `json:"dolt_server_tls,omitempty"`      // Enable TLS for server connections (required for Hosted Dolt)
+	DoltDataDir           string `json:"dolt_data_dir,omitempty"`        // Custom dolt data directory (absolute path; default: .beads/dolt)
+	DoltRemotesAPIPort    int    `json:"dolt_remotesapi_port,omitempty"` // Dolt remotesapi port for federation (default: 8080)
 	// Note: Password should be set via BEADS_DOLT_PASSWORD env var for security
 
 	// Project identity — unique ID generated at bd init time.
@@ -337,6 +342,16 @@ func (c *Config) GetDoltServerUser() string {
 		return c.DoltServerUser
 	}
 	return DefaultDoltServerUser
+}
+
+// GetDoltCredentialCommand returns the credential-helper command bd runs to obtain a
+// short-lived server-mode credential. Checks BEADS_DOLT_CREDENTIAL_COMMAND env first, then
+// config. Empty means no helper — the static BEADS_DOLT_SERVER_USER / credentials-file path applies.
+func (c *Config) GetDoltCredentialCommand() string {
+	if v := os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND"); v != "" {
+		return v
+	}
+	return c.DoltCredentialCommand
 }
 
 // GetDoltDatabase returns the Dolt SQL database name.

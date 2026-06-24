@@ -75,7 +75,9 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 	if cfg == nil {
 		cfg = &Config{}
 	}
-	applyResolvedConfig(beadsDir, fileCfg, cfg)
+	if err := applyResolvedConfig(beadsDir, fileCfg, cfg); err != nil {
+		return nil, err
+	}
 	ApplyCLIAutoStart(beadsDir, cfg)
 
 	return New(ctx, cfg)
@@ -100,7 +102,9 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	if cfg == nil {
 		cfg = &Config{}
 	}
-	applyResolvedConfig(beadsDir, fileCfg, cfg)
+	if err := applyResolvedConfig(beadsDir, fileCfg, cfg); err != nil {
+		return nil, err
+	}
 
 	// Enable auto-start for standalone users (similar to main.go's auto-start
 	// handling), with additional support for BEADS_TEST_MODE and a config.yaml
@@ -194,7 +198,7 @@ func GetBackendFromConfig(beadsDir string) string {
 // applyResolvedConfig merges metadata.json-derived defaults into a store config.
 // Server connection fields are always populated because the storage layer is
 // server-backed even when older metadata.json files omit dolt_mode.
-func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Config) {
+func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Config) error {
 	cfg.Path = fileCfg.DatabasePath(beadsDir)
 	if cfg.BeadsDir == "" {
 		cfg.BeadsDir = beadsDir
@@ -223,8 +227,20 @@ func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Confi
 		// falls back to 3307 which is wrong for standalone repos.
 		cfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
 	}
+	// Resolve the server-mode credential (the MySQL username). A configured credential command
+	// takes precedence over the static user: bd runs the vendor-neutral helper and uses its
+	// short-lived token. Fail closed — never fall back to the static/root user when a helper was
+	// configured but failed, or a wrong identity could connect.
 	if cfg.ServerUser == "" {
-		cfg.ServerUser = fileCfg.GetDoltServerUser()
+		if helper := fileCfg.GetDoltCredentialCommand(); helper != "" {
+			tok, err := resolveCredentialToken(helper)
+			if err != nil {
+				return fmt.Errorf("resolving dolt credential command: %w", err)
+			}
+			cfg.ServerUser = tok
+		} else {
+			cfg.ServerUser = fileCfg.GetDoltServerUser()
+		}
 	}
 	// Populate password and TLS the same way the CLI CRUD path does. Without
 	// this, callers that rely on NewFromConfigWithOptions (e.g. doctor's
@@ -255,6 +271,7 @@ func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Confi
 			}
 		}
 	}
+	return nil
 }
 
 // applyCentralConfigDefaults loads the central server config from
