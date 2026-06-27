@@ -244,6 +244,13 @@ type Config struct {
 	// metadata.json dolt_mode=proxied-server.
 	ProxiedServer bool
 
+	// HostedGateway indicates the server is a hosted beads-gateway: a credential
+	// command supplies a short-lived token as the MySQL username, and the gateway
+	// routes by (and requires) the project database at connect — it rejects a
+	// no-database admin connection. So the existence probe connects with the
+	// project database instead of an empty one.
+	HostedGateway bool
+
 	// AutoStart enables transparent server auto-start when connection fails.
 	// When true and the host is localhost, bd will start a dolt sql-server
 	// automatically if one isn't running. Disabled under orchestrator (GT_ROOT set).
@@ -1154,7 +1161,13 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		autoStartedServerDir: autoStartedDir,
 	}
 
-	if cfg.ReadOnly {
+	if cfg.ReadOnly || cfg.HostedGateway {
+		// A hosted beads-gateway's schema is operator-managed and shared across
+		// tenants: a client must never run migrations (DDL) against it — the
+		// gateway provisions each project at its deployed bd version and would
+		// drop a client's ALTER mid-apply. Verify the binary isn't behind the
+		// deployed schema (forward drift) and proceed on the CRUD wire path;
+		// a matching/older client schema is compatible for reads and writes.
 		if err := schema.CheckForwardDrift(ctx, db); err != nil {
 			_ = db.Close()
 			return nil, err
@@ -1408,8 +1421,22 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	// pairs in dolt-server.log).
 	applyPoolLimits(db, cfg)
 
+	// A hosted beads-gateway owns database routing, existence, and creation: it
+	// authorizes by the project database presented at connect and rejects the
+	// no-db admin probe used below (it exposes neither SHOW DATABASES nor CREATE
+	// DATABASE semantics). Verify the project connection directly and return —
+	// a successful connect IS the existence proof.
+	if cfg.HostedGateway {
+		if err := db.PingContext(ctx); err != nil {
+			_ = db.Close()
+			return nil, "", fmt.Errorf("failed to connect to hosted beads-gateway %s:%d (database %q): %w",
+				cfg.ServerHost, cfg.ServerPort, cfg.Database, err)
+		}
+		return db, connStr, nil
+	}
+
 	// Ensure database exists (may need to create it)
-	// First connect without database to create it
+	// First connect without database to create it.
 	initConnStr := buildServerDSN(cfg, "")
 	initDB, err := sql.Open("mysql", initConnStr)
 	if err != nil {

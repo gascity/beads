@@ -238,6 +238,9 @@ func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Confi
 				return fmt.Errorf("resolving dolt credential command: %w", err)
 			}
 			cfg.ServerUser = tok
+			// A credential helper means a hosted beads-gateway: it requires the
+			// project database at connect, so skip the no-db admin probe.
+			cfg.HostedGateway = true
 		} else {
 			cfg.ServerUser = fileCfg.GetDoltServerUser()
 		}

@@ -61,6 +61,14 @@ var (
 	}
 )
 
+// ResolveCredentialToken is the exported entry point for CLI store construction (cmd/bd),
+// whose global newDoltStore path builds the dolt.Config inline and bypasses
+// applyResolvedConfig. It runs a configured credential helper to obtain a short-lived
+// server-mode credential, identical to the resolution applyResolvedConfig performs.
+func ResolveCredentialToken(command string) (string, error) {
+	return resolveCredentialToken(command)
+}
+
 // resolveCredentialToken returns the bearer token for the given helper command, using a
 // process-level cache keyed by the command so repeated opens don't re-spawn the helper until
 // the token is near expiry. It is concurrency-safe.

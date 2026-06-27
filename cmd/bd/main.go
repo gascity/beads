@@ -1027,7 +1027,23 @@ var rootCmd = &cobra.Command{
 			// config.yaml). Port 0 is fine here — auto-start will resolve it.
 			doltCfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
 			doltCfg.ServerSocket = cfg.GetDoltServerSocket()
-			doltCfg.ServerUser = cfg.GetDoltServerUser()
+			// A configured credential helper means a hosted beads-gateway: run it
+			// for a short-lived token used as the MySQL username (the EIA the
+			// gateway verifies offline) and mark the connection hosted so the
+			// store skips the no-db existence probe the gateway rejects. Fail
+			// closed — never fall back to the static/root user when a helper was
+			// configured but failed, or a wrong identity could connect. Mirrors
+			// applyResolvedConfig, which the global newDoltStore path bypasses.
+			if helper := cfg.GetDoltCredentialCommand(); helper != "" {
+				tok, credErr := dolt.ResolveCredentialToken(helper)
+				if credErr != nil {
+					return HandleError("resolving dolt credential command: %v", credErr)
+				}
+				doltCfg.ServerUser = tok
+				doltCfg.HostedGateway = true
+			} else {
+				doltCfg.ServerUser = cfg.GetDoltServerUser()
+			}
 			// Use the resolved port for credential lookup — metadata.json port
 			// and runtime port can diverge (e.g., tunnel on 3308 vs local on 3307).
 			doltCfg.ServerPassword = cfg.GetDoltServerPasswordForPort(doltCfg.ServerPort)
