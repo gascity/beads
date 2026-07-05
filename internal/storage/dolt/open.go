@@ -231,13 +231,24 @@ func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Confi
 	// takes precedence over the static user: bd runs the vendor-neutral helper and uses its
 	// short-lived token. Fail closed — never fall back to the static/root user when a helper was
 	// configured but failed, or a wrong identity could connect.
+	//
+	// The eager token here only SEEDS the DSN username so buildServerDSN/connStr stays parseable
+	// (and validates the helper at open time — a broken helper still aborts store construction).
+	// On the credential-command path every physical dial re-resolves a fresh cached token via
+	// BeforeConnect (see connector.go), so the baked username is inert and pooled connections
+	// survive token rotation. The guard stays inside `if cfg.ServerUser == ""`: an explicitly
+	// pre-set ServerUser bypasses the helper and keeps the pure static sql.Open path.
 	if cfg.ServerUser == "" {
 		if helper := fileCfg.GetDoltCredentialCommand(); helper != "" {
-			tok, err := resolveCredentialToken(helper)
+			// Open-time eager resolve: no dial context here, so use Background (the
+			// helper keeps its full credCommandTimeout cap). Per-dial resolves on the
+			// connector path thread the dial context so a deadline can abort the mint.
+			tok, err := resolveCredentialToken(context.Background(), helper)
 			if err != nil {
 				return fmt.Errorf("resolving dolt credential command: %w", err)
 			}
 			cfg.ServerUser = tok
+			cfg.CredentialCommand = helper
 			// A credential helper means a hosted beads-gateway: it requires the
 			// project database at connect, so skip the no-db admin probe.
 			cfg.HostedGateway = true

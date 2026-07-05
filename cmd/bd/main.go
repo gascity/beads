@@ -1041,6 +1041,12 @@ var rootCmd = &cobra.Command{
 				}
 				doltCfg.ServerUser = tok
 				doltCfg.HostedGateway = true
+				// Thread the helper so the store's per-dial credential connector
+				// re-mints the token on every new physical connection (FIX #2): the
+				// eager token above only seeds the DSN username, so without this the
+				// CLI/controller path's pooled connections would not survive an EIA
+				// rotation. Mirrors applyResolvedConfig, which this path bypasses.
+				doltCfg.CredentialCommand = helper
 			} else {
 				doltCfg.ServerUser = cfg.GetDoltServerUser()
 			}
