@@ -136,6 +136,17 @@ func resolveCredentialToken(ctx context.Context, command string) (token, usernam
 	return token, username, expiry, nil
 }
 
+// InvalidateCommand drops any cached credential for command so the next resolve
+// re-runs the helper. Callers use it when a server rejects a presented credential
+// before its recorded expiry — e.g. a rotating token revoked mid-life — so a retry
+// re-mints instead of re-presenting the dead value until its stale expiry. No-op
+// when nothing is cached.
+func InvalidateCommand(command string) {
+	credCacheMu.Lock()
+	delete(credCache, command)
+	credCacheMu.Unlock()
+}
+
 // parseCredential extracts the token (and any username/expiry) from a helper's
 // stdout. A JSON object is read as the ExecCredential/getToken envelope; otherwise
 // the trimmed output is taken as a bare token. A bare value containing whitespace is

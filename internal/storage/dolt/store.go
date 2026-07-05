@@ -39,6 +39,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/creds"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -162,6 +163,7 @@ type DoltStore struct {
 	database      string       // Database name (subdirectory under dbPath)
 	closed        atomic.Bool  // Tracks whether Close() has been called
 	connStr       string       // Connection string for reconnection
+	credCommand   string       // non-empty on the hosted credential-command path; drives openSQLDB
 	mu            sync.RWMutex // Protects concurrent access
 	readOnly      bool         // True if opened in read-only mode
 	credentialKey []byte       // Random encryption key for federation credentials
@@ -222,6 +224,13 @@ type Config struct {
 	ServerUser     string // MySQL user (default: root)
 	ServerPassword string // MySQL password (default: empty, can be set via BEADS_DOLT_PASSWORD)
 	ServerTLS      bool   // Enable TLS for server connections (required for Hosted Dolt)
+
+	// CredentialCommand is the helper command re-run at each new physical
+	// connection dial (the hosted gateway credential-command path). Empty means
+	// the static ServerUser is baked into the DSN and connections use plain
+	// sql.Open. Set by ApplyGatewayCredential (BEADS_DOLT_CREDENTIAL_COMMAND)
+	// when no explicit ServerUser is configured.
+	CredentialCommand string
 
 	// Remote auth for Hosted Dolt push/pull (optional)
 	// When set, Push/Pull use the --user flag and set DOLT_REMOTE_PASSWORD env var.
@@ -358,6 +367,20 @@ func newServerRetryBackoff() backoff.BackOff {
 	bo := backoff.NewExponentialBackOff()
 	bo.MaxElapsedTime = serverRetryMaxElapsed
 	return bo
+}
+
+// isAuthError reports whether err is a MySQL access-denied (1045) failure — the
+// server rejecting a presented credential. On the credential-command path this is
+// the signal that a cached rotating token was revoked before its recorded expiry.
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var myErr *mysql.MySQLError
+	if errors.As(err, &myErr) {
+		return myErr.Number == 1045
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "access denied")
 }
 
 // isRetryableError returns true if the error is a transient connection error
@@ -505,6 +528,15 @@ func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
 	err := backoff.Retry(func() error {
 		attempts++
 		err := op()
+		// A rotating credential revoked before its cached expiry surfaces as a server
+		// auth rejection (MySQL 1045). Drop the cached token so the retry's new dial
+		// re-mints a fresh one via BeforeConnect; only on the credential-command path
+		// (a static user has nothing to refresh). Bounded by the retry backoff, so a
+		// genuinely dead credential fails after a few attempts rather than looping.
+		if err != nil && s.credCommand != "" && isAuthError(err) {
+			creds.InvalidateCommand(s.credCommand)
+			return err
+		}
 		if err != nil && isRetryableError(err) {
 			// Record connection-level failures to the circuit breaker
 			if s.breaker != nil && isConnectionError(err) {
@@ -549,6 +581,7 @@ var doltMetrics struct {
 	connAcquireMs       metric.Float64Histogram
 	poolWaitCount       metric.Int64Counter
 	poolWaitMs          metric.Float64Histogram
+	ignoredTxFreshPool  metric.Int64Counter
 }
 
 func init() {
@@ -588,6 +621,10 @@ func init() {
 	doltMetrics.poolWaitMs, _ = m.Float64Histogram("bd.db.pool_wait_ms",
 		metric.WithDescription("Total time connections spent waiting due to pool exhaustion"),
 		metric.WithUnit("ms"),
+	)
+	doltMetrics.ignoredTxFreshPool, _ = m.Int64Counter("bd.db.ignored_tx_fresh_pool",
+		metric.WithDescription("ignored-tx transactions that fell back to a dedicated single-connection pool instead of borrowing from the main pool"),
+		metric.WithUnit("{tx}"),
 	)
 }
 
@@ -1194,6 +1231,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		beadsDir:             beadsDir,
 		database:             cfg.Database,
 		connStr:              connStr,
+		credCommand:          cfg.CredentialCommand,
 		breaker:              breaker,
 		committerName:        cfg.CommitterName,
 		committerEmail:       cfg.CommitterEmail,
@@ -1378,7 +1416,7 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 		return fmt.Errorf("failed to parse DSN for long-timeout connection: %w", err)
 	}
 	cfg.ReadTimeout = 5 * time.Minute
-	db, err := sql.Open("mysql", cfg.FormatDSN())
+	db, err := openSQLDB(cfg.FormatDSN(), s.credCommand)
 	if err != nil {
 		return fmt.Errorf("failed to open long-timeout connection: %w", err)
 	}
@@ -1405,7 +1443,7 @@ func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, a
 		return fmt.Errorf("failed to parse DSN for long-timeout connection: %w", err)
 	}
 	cfg.ReadTimeout = 5 * time.Minute
-	db, err := sql.Open("mysql", cfg.FormatDSN())
+	db, err := openSQLDB(cfg.FormatDSN(), s.credCommand)
 	if err != nil {
 		return fmt.Errorf("failed to open long-timeout connection: %w", err)
 	}
@@ -1458,7 +1496,7 @@ func applyPoolLimits(db *sql.DB, cfg *Config) {
 func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, error) {
 	connStr := buildServerDSN(cfg, cfg.Database)
 
-	db, err := sql.Open("mysql", connStr)
+	db, err := openSQLDB(connStr, cfg.CredentialCommand)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to open Dolt server connection: %w", err)
 	}
@@ -1495,7 +1533,7 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	// Ensure database exists (may need to create it)
 	// First connect without database to create it
 	initConnStr := buildServerDSN(cfg, "")
-	initDB, err := sql.Open("mysql", initConnStr)
+	initDB, err := openSQLDB(initConnStr, cfg.CredentialCommand)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to open init connection: %w", err)
 	}
@@ -1740,7 +1778,7 @@ func (s *DoltStore) openMigrationDB() (*sql.DB, error) {
 	}
 	cfg.ReadTimeout = 0
 	cfg.WriteTimeout = 0
-	db, err := sql.Open("mysql", cfg.FormatDSN())
+	db, err := openSQLDB(cfg.FormatDSN(), s.credCommand)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open migration connection: %w", err)
 	}
@@ -2766,7 +2804,7 @@ func (s *DoltStore) openLongTimeoutConn() (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to parse DSN for long-timeout connection: %w", err)
 	}
 	cfg.ReadTimeout = 5 * time.Minute
-	db, err := sql.Open("mysql", cfg.FormatDSN())
+	db, err := openSQLDB(cfg.FormatDSN(), s.credCommand)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open long-timeout connection: %w", err)
 	}

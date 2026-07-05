@@ -197,6 +197,61 @@ func TestCLIDirUsesDbPathOutsideSharedServerMode(t *testing.T) {
 	}
 }
 
+func TestApplyResolvedConfig_SetsCredentialCommand(t *testing.T) {
+	serverCfg := func() *configfile.Config {
+		return &configfile.Config{
+			Backend:      configfile.BackendDolt,
+			DoltMode:     configfile.DoltModeServer,
+			DoltDatabase: "beads_codex",
+		}
+	}
+
+	t.Run("credential command threaded and eager token seeded", func(t *testing.T) {
+		const helper = `printf '{"access_token":"eager-tok","expires_in":300}'`
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", helper)
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), t.TempDir(), serverCfg(), cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+		if cfg.CredentialCommand != helper {
+			t.Fatalf("CredentialCommand = %q, want %q", cfg.CredentialCommand, helper)
+		}
+		if cfg.ServerUser != "eager-tok" {
+			t.Fatalf("ServerUser = %q, want the eager token %q", cfg.ServerUser, "eager-tok")
+		}
+	})
+
+	t.Run("explicit ServerUser bypasses the helper", func(t *testing.T) {
+		// A failing command doubles as an exec detector: no error proves it never ran.
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "false")
+		cfg := &Config{ServerUser: "preset"}
+
+		if err := applyResolvedConfig(context.Background(), t.TempDir(), serverCfg(), cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+		if cfg.CredentialCommand != "" {
+			t.Fatalf("CredentialCommand = %q, want empty (static path preserved)", cfg.CredentialCommand)
+		}
+		if cfg.ServerUser != "preset" {
+			t.Fatalf("ServerUser = %q, want it left as %q", cfg.ServerUser, "preset")
+		}
+	})
+
+	t.Run("failing helper aborts store construction (fail-closed)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "false")
+		cfg := &Config{}
+
+		err := applyResolvedConfig(context.Background(), t.TempDir(), serverCfg(), cfg)
+		if err == nil {
+			t.Fatal("expected a fail-closed error when the helper fails")
+		}
+		if !strings.Contains(err.Error(), "resolving dolt credential command") {
+			t.Fatalf("error = %q, want it to wrap %q", err.Error(), "resolving dolt credential command")
+		}
+	})
+}
+
 func TestApplyResolvedConfig(t *testing.T) {
 	t.Run("fills server config for legacy metadata without dolt_mode", func(t *testing.T) {
 		beadsDir := t.TempDir()

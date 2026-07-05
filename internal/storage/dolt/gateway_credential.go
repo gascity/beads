@@ -27,36 +27,74 @@ import (
 // aborts the open and never falls back to the static/root user — a wrong identity must
 // never connect. It also disables auto-start: a gateway server is externally managed, so
 // spawning a local dolt server would shadow it.
+//
+// The token resolved here only SEEDS the DSN username (and validates the helper at
+// open time — a broken helper still aborts store construction). The command itself is
+// threaded into cfg.CredentialCommand so the store's per-dial connector (connector.go)
+// re-resolves a live token at each new physical connection dial: pooled connections
+// are never re-authenticated by the server, so they survive token rotation, while
+// new/replacement dials authenticate with a fresh token instead of the stale seed.
 func ApplyGatewayCredential(ctx context.Context, fileCfg *configfile.Config, cfg *Config) (bool, error) {
 	if cfg.ServerUser != "" {
 		return false, nil
 	}
+	command := fileCfg.GetDoltCredentialCommand()
+	tok, ok, err := resolveGatewayToken(ctx, command)
+	if err != nil || !ok {
+		return false, err
+	}
+	cfg.ServerUser = tok
+	cfg.CredentialCommand = command
+	cfg.Gateway = true
+	cfg.DisableAutoStart = true
+	return true, nil
+}
+
+// resolveGatewayToken resolves command into a token safe to present as the connection
+// (MySQL) username. It is the shared resolution path for the open-time eager seed
+// (ApplyGatewayCredential) and the per-dial connector hook (resolveGatewayDialToken),
+// so both apply identical fail-closed validation. ok is false when no command is
+// configured. The creds command cache makes repeated calls a map hit until the token
+// nears expiry.
+func resolveGatewayToken(ctx context.Context, command string) (string, bool, error) {
 	cred, ok, err := creds.ResolveLadder(ctx, creds.CommandSource{
-		Command: fileCfg.GetDoltCredentialCommand(),
+		Command: command,
 		Kind:    creds.KindIdentity,
 		Label:   "BEADS_DOLT_CREDENTIAL_COMMAND",
 	})
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	if !ok {
-		return false, nil
+		return "", false, nil
 	}
 	// Defense in depth: the token is presented AS the username, so a non-identity
 	// credential must never reach this slot.
 	if cred.Kind != creds.KindIdentity {
-		return false, fmt.Errorf("dolt: credential from %s is not an identity; refusing to present it as the connection username", cred.Source)
+		return "", false, fmt.Errorf("dolt: credential from %s is not an identity; refusing to present it as the connection username", cred.Source)
 	}
 	// The token becomes the DSN username; the go-sql-driver grammar has no escaping for
 	// the user field, so a ':' '@' or '/' would silently mis-split it into user/password.
 	// Reject rather than connect with a mangled identity. (JWTs are base64url + '.', safe.)
 	if strings.ContainsAny(cred.Value, ":@/") {
-		return false, fmt.Errorf("dolt: credential from %s contains a character (:, @, or /) that cannot be placed in the connection username", cred.Source)
+		return "", false, fmt.Errorf("dolt: credential from %s contains a character (:, @, or /) that cannot be placed in the connection username", cred.Source)
 	}
 	// cred.Username (a dynamic user/password pair) is meaningless here: the token IS the
 	// username. Ignored deliberately.
-	cfg.ServerUser = cred.Value
-	cfg.Gateway = true
-	cfg.DisableAutoStart = true
-	return true, nil
+	return cred.Value, true, nil
+}
+
+// resolveGatewayDialToken resolves a live gateway token for one new physical
+// connection dial — the default behind connector.go's BeforeConnect hook. The store
+// only builds a credential connector when a command is configured, so an
+// unconfigured resolution here is a wiring bug and fails closed.
+func resolveGatewayDialToken(ctx context.Context, command string) (string, error) {
+	tok, ok, err := resolveGatewayToken(ctx, command)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("dolt: credential connector built without a credential command")
+	}
+	return tok, nil
 }

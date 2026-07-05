@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -36,6 +37,33 @@ type mockDriver struct {
 	opens  atomic.Int64 // total Open() calls (NewConnection events)
 	closes atomic.Int64 // total Close() calls (ConnectionClosed events)
 	live   atomic.Int64 // currently-open connections
+
+	qmu     sync.Mutex // guards queries
+	queries []string   // every query string passed to Prepare (borrow-path assertions)
+
+	// failCheckout makes Prepare of a DOLT_CHECKOUT statement fail, so borrow-path
+	// tests can force beginTxOnConn to error and fall through to the fallback.
+	failCheckout atomic.Bool
+}
+
+// recordQuery appends a prepared query for later assertion.
+func (d *mockDriver) recordQuery(query string) {
+	d.qmu.Lock()
+	d.queries = append(d.queries, query)
+	d.qmu.Unlock()
+}
+
+// countQuery returns how many recorded queries contain substr.
+func (d *mockDriver) countQuery(substr string) int {
+	d.qmu.Lock()
+	defer d.qmu.Unlock()
+	n := 0
+	for _, q := range d.queries {
+		if strings.Contains(q, substr) {
+			n++
+		}
+	}
+	return n
 }
 
 func (d *mockDriver) Open(name string) (driver.Conn, error) {
@@ -52,6 +80,10 @@ type mockConn struct {
 }
 
 func (c *mockConn) Prepare(query string) (driver.Stmt, error) {
+	c.drv.recordQuery(query)
+	if c.drv.failCheckout.Load() && strings.Contains(query, "DOLT_CHECKOUT") {
+		return nil, fmt.Errorf("mock: forced DOLT_CHECKOUT failure")
+	}
 	return &mockStmt{}, nil
 }
 

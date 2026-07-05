@@ -107,6 +107,64 @@ func TestResolveCredentialTokenPropagatesHelperError(t *testing.T) {
 	}
 }
 
+// TestResolveCredentialTokenHonorsCallerContext is a teeth test: the mint must
+// abort when the caller's (dial) context deadline fires, instead of blocking for
+// the full credCommandTimeout. Reverting resolveCredentialToken to
+// context.Background() makes the blocking helper wait the full 30s and this fails.
+func TestResolveCredentialTokenHonorsCallerContext(t *testing.T) {
+	resetCache(t)
+	// Models a slow/hung helper: blocks until its (derived) context is cancelled.
+	credRunner = func(ctx context.Context, _ string) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, _, _, err := resolveCredentialToken(ctx, "slow-helper")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected an error when the caller context deadline fires")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("resolve took %v — caller context was not honored (would block up to credCommandTimeout=%v)", elapsed, credCommandTimeout)
+	}
+}
+
+// TestInvalidateCommand is a teeth test: after invalidation a still-unexpired
+// cached token is dropped so the next resolve re-mints. If InvalidateCommand
+// failed to delete, the third resolve would be a cache hit and calls would stay
+// at 1.
+func TestInvalidateCommand(t *testing.T) {
+	resetCache(t)
+	var calls int
+	credRunner = func(_ context.Context, _ string) ([]byte, error) {
+		calls++
+		return []byte(`{"access_token":"tok","expires_in":3600}`), nil
+	}
+
+	const cmd = "rotating-helper"
+	if _, _, _, err := resolveCredentialToken(context.Background(), cmd); err != nil {
+		t.Fatalf("first resolve: %v", err)
+	}
+	if _, _, _, err := resolveCredentialToken(context.Background(), cmd); err != nil {
+		t.Fatalf("second resolve: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 helper call before invalidation (long expiry cached), got %d", calls)
+	}
+
+	InvalidateCommand(cmd)
+
+	if _, _, _, err := resolveCredentialToken(context.Background(), cmd); err != nil {
+		t.Fatalf("post-invalidation resolve: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected a re-mint after invalidation, got calls=%d", calls)
+	}
+}
+
 // A real shell command flows end-to-end through CommandSource (no stub), proving the
 // sh -c runner and the bare-token path work together.
 func TestCommandSourceRealShell(t *testing.T) {
