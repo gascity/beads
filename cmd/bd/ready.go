@@ -16,6 +16,14 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
+// readyWorkCounter is the optional store capability that sizes the total ready
+// count cheaply (SELECT COUNT(*) over the ready predicate) instead of re-running
+// the counts mega-query unbounded. Local backends implement it; callers fall
+// back to GetReadyWorkWithCounts when a store does not.
+type readyWorkCounter interface {
+	CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error)
+}
+
 var readyCmd = &cobra.Command{
 	Use:   "ready",
 	Short: "Show ready work (open, no active blockers)",
@@ -237,12 +245,26 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			totalReady := len(results)
 			truncated := false
 			if filter.Limit > 0 && len(results) == filter.Limit {
-				countFilter := filter
-				countFilter.Limit = 0
-				all, countErr := activeStore.GetReadyWorkWithCounts(ctx, countFilter)
-				if countErr == nil && len(all) > len(results) {
-					totalReady = len(all)
-					truncated = true
+				// The page is full, so there may be more ready work. Size the true
+				// total N with a cheap COUNT(*) over the same ready predicate rather
+				// than re-running the whole counts mega-query unbounded. The count is
+				// byte-identical to len(GetReadyWorkWithCounts(Limit=0)); fall back to
+				// that method only if the store predates the ReadyCounter capability.
+				// Unwrap past the HookFiringStore decorator so the assertion reaches
+				// the concrete store that carries the optional ReadyCounter method.
+				if counter, ok := storage.UnwrapStore(activeStore).(readyWorkCounter); ok {
+					if n, countErr := counter.CountReadyWork(ctx, filter); countErr == nil && n > len(results) {
+						totalReady = n
+						truncated = true
+					}
+				} else {
+					countFilter := filter
+					countFilter.Limit = 0
+					all, countErr := activeStore.GetReadyWorkWithCounts(ctx, countFilter)
+					if countErr == nil && len(all) > len(results) {
+						totalReady = len(all)
+						truncated = true
+					}
 				}
 			}
 			if results == nil {
