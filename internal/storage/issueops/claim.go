@@ -99,9 +99,9 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 			return &ClaimResult{OldIssue: oldIssue, IsWisp: isWisp}, nil
 		}
 		if assignee != "" && assignee != actor {
-			return nil, fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, assignee)
+			return nil, fmt.Errorf("%w%s%s", storage.ErrAlreadyClaimed, storage.ClaimedByFragment, assignee)
 		}
-		return nil, fmt.Errorf("%w: status %s", storage.ErrNotClaimable, currentStatus)
+		return nil, fmt.Errorf("%w%s%s", storage.ErrNotClaimable, storage.NotClaimableStatusFragment, currentStatus)
 	}
 
 	// Record the claim event.

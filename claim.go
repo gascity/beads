@@ -3,6 +3,8 @@ package beads
 import (
 	"errors"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // ClaimConflict describes why a claim failed, recovered from the claim error.
@@ -23,9 +25,16 @@ type ClaimConflict struct {
 	CurrentStatus string
 }
 
-const (
-	alreadyClaimedMarker = "issue already claimed by "
-	notClaimableMarker   = "issue not claimable: status "
+// alreadyClaimedMarker and notClaimableMarker are derived at package-init time
+// from the storage layer's sentinel + format fragment, NOT hardcoded literals,
+// so the producer (issueops/claim.go) and this parser cannot drift: both spell
+// the conflict message as "<sentinel><fragment><token>". A change to either the
+// sentinel text or the fragment moves both ends in lockstep, and the producer-
+// tied round-trip test (claim_roundtrip_test.go / the dolt suite) is the
+// tripwire if the producer stops using the fragment at all.
+var (
+	alreadyClaimedMarker = storage.ErrAlreadyClaimed.Error() + storage.ClaimedByFragment
+	notClaimableMarker   = storage.ErrNotClaimable.Error() + storage.NotClaimableStatusFragment
 )
 
 // ParseClaimConflict inspects a claim error and, when it wraps ErrAlreadyClaimed
@@ -49,9 +58,22 @@ func ParseClaimConflict(err error) (ClaimConflict, bool) {
 
 // tailAfter returns the substring following the last occurrence of marker in s,
 // or "" when marker is absent.
+//
+// The recovered token (assignee/status) is the message's trailing run BY REPO
+// CONVENTION: claim-error wraps PREPEND context ("caller ctx: %w"), never append
+// it, so the fragment appears once near the end and its tail is the bare token.
+// As a guard against a future appended wrap corrupting the token, if the tail
+// still contains a known claim marker we treat it as ambiguous and return "" —
+// a recovered-empty field is the documented best-effort failure mode, and the
+// round-trip test would go red before any garbage token could reach a caller.
 func tailAfter(s, marker string) string {
-	if i := strings.LastIndex(s, marker); i >= 0 {
-		return s[i+len(marker):]
+	i := strings.LastIndex(s, marker)
+	if i < 0 {
+		return ""
 	}
-	return ""
+	tail := s[i+len(marker):]
+	if strings.Contains(tail, alreadyClaimedMarker) || strings.Contains(tail, notClaimableMarker) {
+		return ""
+	}
+	return tail
 }

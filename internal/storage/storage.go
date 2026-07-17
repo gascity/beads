@@ -23,6 +23,19 @@ var ErrAlreadyClaimed = errors.New("issue already claimed")
 // same actor owning the claim.
 var ErrNotClaimable = errors.New("issue not claimable")
 
+// ClaimedByFragment and NotClaimableStatusFragment are the exact message
+// fragments the claim path (issueops/claim.go) appends after the sentinel to
+// carry the conflicting assignee/status: ErrAlreadyClaimed is wrapped as
+// "<sentinel> by <assignee>" and ErrNotClaimable as "<sentinel>: status
+// <status>". They are the single source of truth for that format so producer
+// (claim.go) and consumer (beads.ParseClaimConflict) cannot drift: the consumer
+// reconstructs its marker as ErrAlreadyClaimed.Error()+ClaimedByFragment rather
+// than hardcoding the literal.
+const (
+	ClaimedByFragment          = " by "
+	NotClaimableStatusFragment = ": status "
+)
+
 // ErrNotFound is returned when a requested entity does not exist in the database.
 var ErrNotFound = errors.New("not found")
 
