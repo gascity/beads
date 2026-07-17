@@ -34,22 +34,66 @@ type RemoteStore = storage.RemoteStore
 // SyncStore provides high-level sync operations with peers.
 type SyncStore = storage.SyncStore
 
-// DependencyQueryStore provides extended dependency queries beyond the base
-// Storage interface (raw source-keyed and target-keyed dependency records,
-// blocking info, counts). Type-assert a Storage value to reach it:
-//
-//	if dq, ok := store.(beads.DependencyQueryStore); ok {
-//	    rows, err := dq.GetDependentRecords(ctx, targetID, "", 100, "")
-//	}
-type DependencyQueryStore = storage.DependencyQueryStore
-
-// EventQueryStore provides keyset paging over the durable event log
-// (EventsSince). Type-assert a Storage value to reach it.
-type EventQueryStore = storage.EventQueryStore
-
 // EventCursor is a keyset position in the durable events stream, ordered by
 // (created_at, id). The zero value means "from the beginning".
 type EventCursor = storage.EventCursor
+
+// EventQuerier is the durable-event-feed surface of a Storage: keyset paging
+// over the durable event log, beyond the base Storage's time-only
+// GetAllEventsSince. It is a NARROW, hand-declared root interface exposing
+// exactly what consumers need — not an alias of the internal EventQueryStore —
+// so the published surface stays small and independent of the engine interface.
+// Reach it via AsEventQuerier.
+type EventQuerier interface {
+	// EventsSince returns durable events strictly after cursor, ordered by
+	// (created_at ASC, id ASC), bounded by limit (0 = a store default, capped).
+	// issueID scopes the feed to one bead's history ("" = all).
+	EventsSince(ctx context.Context, cursor EventCursor, issueID string, limit int) ([]*Event, error)
+}
+
+// DependentQuerier is the target-keyed dependents surface of a Storage: the raw
+// inbound-edge reads that back group-membership. Like EventQuerier it is a
+// NARROW hand-declared root interface (not an alias of DependencyQueryStore),
+// exposing only the two calls consumers use. Reach it via AsDependentQuerier.
+type DependentQuerier interface {
+	// GetDependentRecords returns raw dependency rows whose target is targetID,
+	// paged by the dependency row id (afterID, "" = start). See the engine doc
+	// for the two-table span and raw-read/policy-at-hydration contract.
+	GetDependentRecords(ctx context.Context, targetID string, depType string, limit int, afterID string) ([]*Dependency, error)
+	// CountDependentRecords returns the true total inbound-edge count of targetID
+	// (depType "" = all) without paging.
+	CountDependentRecords(ctx context.Context, targetID string, depType string) (int, error)
+}
+
+// AsEventQuerier returns the EventQuerier view of s, unwrapping a HookFiringStore
+// decorator so a decorated store keeps the capability. Assert once and fail
+// loud. Mirrors AsIssueClaimer.
+func AsEventQuerier(s Storage) (EventQuerier, bool) {
+	if q, ok := s.(EventQuerier); ok {
+		return q, true
+	}
+	if ds, ok := s.(storage.DoltStorage); ok {
+		if q, ok := storage.UnwrapStore(ds).(EventQuerier); ok {
+			return q, true
+		}
+	}
+	return nil, false
+}
+
+// AsDependentQuerier returns the DependentQuerier view of s, unwrapping a
+// HookFiringStore decorator so a decorated store keeps the capability. Assert
+// once and fail loud. Mirrors AsIssueClaimer.
+func AsDependentQuerier(s Storage) (DependentQuerier, bool) {
+	if q, ok := s.(DependentQuerier); ok {
+		return q, true
+	}
+	if ds, ok := s.(storage.DoltStorage); ok {
+		if q, ok := storage.UnwrapStore(ds).(DependentQuerier); ok {
+			return q, true
+		}
+	}
+	return nil, false
+}
 
 // Claim error sentinels, re-exported (aliased, so errors.Is works across the
 // package boundary) from the storage layer. A claim that fails because the
@@ -79,12 +123,30 @@ type IssueClaimer interface {
 
 // AsIssueClaimer returns the IssueClaimer view of s when the backing store
 // supports atomic claim (Dolt-backed stores do), and (nil, false) otherwise.
-// Assert once at startup and fail loud: a Storage decorator that does not
-// forward the claim surface makes this return false.
+// Assert once at startup and fail loud. It unwraps a HookFiringStore decorator
+// so a decorated store keeps the claim surface.
 func AsIssueClaimer(s Storage) (IssueClaimer, bool) {
-	c, ok := s.(IssueClaimer)
-	return c, ok
+	if c, ok := s.(IssueClaimer); ok {
+		return c, true
+	}
+	if ds, ok := s.(storage.DoltStorage); ok {
+		if c, ok := storage.UnwrapStore(ds).(IssueClaimer); ok {
+			return c, true
+		}
+	}
+	return nil, false
 }
+
+// Compile-time drift guards: the full engine interface storage.DoltStorage must
+// satisfy each narrow public surface, so a signature change to the claim / event
+// / dependents methods on the engine breaks the build here instead of silently
+// making As* return false at runtime. Concrete-store conformance is asserted in
+// the tests (both Dolt stores).
+var (
+	_ IssueClaimer     = (storage.DoltStorage)(nil)
+	_ EventQuerier     = (storage.DoltStorage)(nil)
+	_ DependentQuerier = (storage.DoltStorage)(nil)
+)
 
 // VersionControlReader provides read-only version control operations.
 // Write operations (Branch, Checkout, Merge, DeleteBranch) are not yet
