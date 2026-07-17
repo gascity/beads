@@ -177,11 +177,16 @@ func TestDependentTargetPredicateSargablePostgres(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenRaw: %v", err)
 	}
-	defer raw.Close()
+	// Close LAST. t.Cleanup runs LIFO, so registering the close first makes it
+	// run after the DROP below — a `defer raw.Close()` would instead close the
+	// pool before any t.Cleanup DROP, so the drop would silently no-op on a
+	// closed connection and leak the schema.
+	t.Cleanup(func() { _ = raw.Close() })
 	ctx := context.Background()
 	if _, err := raw.ExecContext(ctx, fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %q`, schema)); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
+	// Registered after the close cleanup, so it runs FIRST — while raw is open.
 	t.Cleanup(func() {
 		_, _ = raw.ExecContext(context.Background(), fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, schema))
 	})
