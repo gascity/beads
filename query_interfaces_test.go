@@ -18,6 +18,7 @@ var (
 	_ beads.IssueClaimer     = (*dolt.DoltStore)(nil)
 	_ beads.EventQuerier     = (*dolt.DoltStore)(nil)
 	_ beads.DependentQuerier = (*dolt.DoltStore)(nil)
+	_ beads.BlockedQuerier   = (*dolt.DoltStore)(nil)
 )
 
 // TestQueryInterfacesAgainstRealDolt exercises AsEventQuerier / AsDependentQuerier
@@ -76,6 +77,29 @@ func TestQueryInterfacesAgainstRealDolt(t *testing.T) {
 	if len(evs) == 0 {
 		t.Fatalf("EventsSince returned no durable events after creates")
 	}
+
+	bq, ok := beads.AsBlockedQuerier(store)
+	if !ok {
+		t.Fatalf("AsBlockedQuerier returned ok=false for a live Dolt Storage")
+	}
+	batch, err := bq.IsBlockedBatch(ctx, []string{"qi-src", "qi-target"})
+	if err != nil {
+		t.Fatalf("IsBlockedBatch: %v", err)
+	}
+	// qi-src blocks-depends on the open qi-target, so it is blocked; qi-target
+	// has no open blocker. The batch value must match per-row IsBlocked.
+	for _, id := range []string{"qi-src", "qi-target"} {
+		want, _, err := bq.IsBlocked(ctx, id)
+		if err != nil {
+			t.Fatalf("IsBlocked(%s): %v", id, err)
+		}
+		if batch[id] != want {
+			t.Fatalf("IsBlockedBatch[%s] = %v, want %v (per-row IsBlocked)", id, batch[id], want)
+		}
+	}
+	if !batch["qi-src"] {
+		t.Fatalf("IsBlockedBatch[qi-src] = false, want true (blocked by open qi-target)")
+	}
 }
 
 // TestAsAccessorsResolveThroughHookDecorator proves the decorator contract that
@@ -111,5 +135,8 @@ func TestAsAccessorsResolveThroughHookDecorator(t *testing.T) {
 	}
 	if _, ok := beads.AsDependentQuerier(decorated); !ok {
 		t.Errorf("AsDependentQuerier returned ok=false through a HookFiringStore decorator")
+	}
+	if _, ok := beads.AsBlockedQuerier(decorated); !ok {
+		t.Errorf("AsBlockedQuerier returned ok=false through a HookFiringStore decorator")
 	}
 }

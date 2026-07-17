@@ -13,4 +13,5 @@ var (
 	_ beads.IssueClaimer     = (*embeddeddolt.EmbeddedDoltStore)(nil)
 	_ beads.EventQuerier     = (*embeddeddolt.EmbeddedDoltStore)(nil)
 	_ beads.DependentQuerier = (*embeddeddolt.EmbeddedDoltStore)(nil)
+	_ beads.BlockedQuerier   = (*embeddeddolt.EmbeddedDoltStore)(nil)
 )

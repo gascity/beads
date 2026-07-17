@@ -65,12 +65,37 @@ type DependentQuerier interface {
 	CountDependentRecords(ctx context.Context, targetID string, depType string) (int, error)
 }
 
+// BlockedQuerier is the transitive-blocked surface of a Storage: the
+// denormalized is_blocked flag, single or batched. Like EventQuerier it is a
+// NARROW hand-declared root interface (not an alias of DependencyQueryStore),
+// exposing only the reads consumers use. IsBlockedBatch returns the is_blocked
+// column for a whole page in one round-trip — the same transitive value
+// IsBlocked returns per id, with no N-call fan-out. Reach it via AsBlockedQuerier.
+type BlockedQuerier interface {
+	// IsBlocked reports whether issueID is blocked (its denormalized transitive
+	// is_blocked flag) and the open direct blockers for display.
+	IsBlocked(ctx context.Context, issueID string) (bool, []string, error)
+	// IsBlockedBatch returns the denormalized transitive is_blocked flag for each
+	// of ids in one batched read. ids present in neither the issues nor wisps
+	// table are absent from the map; callers treat absent as not-blocked.
+	IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error)
+}
+
 // AsEventQuerier returns the EventQuerier view of s, or (nil, false) when the
 // backing store does not expose the durable-event feed. Assert once and fail
 // loud. A single direct assertion is sufficient — see the decorator contract on
 // AsIssueClaimer.
 func AsEventQuerier(s Storage) (EventQuerier, bool) {
 	q, ok := s.(EventQuerier)
+	return q, ok
+}
+
+// AsBlockedQuerier returns the BlockedQuerier view of s, or (nil, false) when the
+// backing store does not expose the transitive-blocked reads. Assert once and
+// fail loud. A single direct assertion is sufficient — see the decorator
+// contract on AsIssueClaimer.
+func AsBlockedQuerier(s Storage) (BlockedQuerier, bool) {
+	q, ok := s.(BlockedQuerier)
 	return q, ok
 }
 
@@ -139,6 +164,7 @@ var (
 	_ IssueClaimer     = (storage.DoltStorage)(nil)
 	_ EventQuerier     = (storage.DoltStorage)(nil)
 	_ DependentQuerier = (storage.DoltStorage)(nil)
+	_ BlockedQuerier   = (storage.DoltStorage)(nil)
 )
 
 // VersionControlReader provides read-only version control operations.
