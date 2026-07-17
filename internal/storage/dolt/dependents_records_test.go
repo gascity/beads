@@ -3,6 +3,7 @@ package dolt
 import (
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -175,6 +176,111 @@ func TestCountDependentRecords(t *testing.T) {
 		t.Fatalf("CountDependentRecords(leaf): %v", err)
 	} else if n != 0 {
 		t.Fatalf("CountDependentRecords(leaf) = %d, want 0", n)
+	}
+}
+
+// TestDependentRecordsCrossTableCollision seeds the SAME logical edge in BOTH
+// the durable and wisp dependency tables — they share one depid-derived id
+// because depid.New keys on (issue_id, target) and omits the table — and proves
+// the target-keyed reads treat it as a single inbound edge: GetDependentRecords
+// returns one row per id (the durable copy), CountDependentRecords equals the
+// distinct total (not the sum of two per-table COUNTs), and keyset paging is
+// stable across the collision (no dup, no drop). A collision like this arises
+// from a wisp promoted to durable or two Dolt clones merged.
+func TestDependentRecordsCrossTableCollision(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	mk := func(id string, ephemeral bool) {
+		iss := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: ephemeral}
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	mk("cc-target", false)
+	mk("cc-a", false) // durable source of the collision edge
+	mk("cc-c", false) // durable-only dependent
+	mk("cc-w", true)  // genuine wisp-only dependent
+
+	add := func(src string) {
+		if err := store.AddDependency(ctx, &types.Dependency{IssueID: src, DependsOnID: "cc-target", Type: types.DepBlocks}, "tester"); err != nil {
+			t.Fatalf("add dep %s: %v", src, err)
+		}
+	}
+	add("cc-a") // -> dependencies, id = depid.New("cc-a", "cc-target")
+	add("cc-c") // -> dependencies
+	add("cc-w") // wisp source -> wisp_dependencies
+
+	// Force the collision: the SAME (cc-a, cc-target) edge into wisp_dependencies
+	// with the same depid. FK checks are relaxed because cc-a is not a wisp — the
+	// point is to reproduce the post-merge/promotion state where one edge exists
+	// in both tables under one id.
+	collisionID := depid.New("cc-a", "cc-target")
+	if _, err := store.db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatalf("disable FK checks: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		"INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, type, created_by) VALUES (?, ?, ?, 'blocks', 'tester')",
+		collisionID, "cc-a", "cc-target"); err != nil {
+		t.Fatalf("seed collision row: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatalf("re-enable FK checks: %v", err)
+	}
+
+	// One row per id: cc-a appears once (its durable copy), never twice.
+	all, err := store.GetDependentRecords(ctx, "cc-target", "", 100, "")
+	if err != nil {
+		t.Fatalf("GetDependentRecords: %v", err)
+	}
+	ids := map[string]int{}
+	srcs := map[string]bool{}
+	for _, d := range all {
+		ids[d.ID]++
+		srcs[d.IssueID] = true
+	}
+	for id, n := range ids {
+		if n != 1 {
+			t.Fatalf("id %s appears %d times in one page; want exactly 1 (collision not de-duped)", id, n)
+		}
+	}
+	if len(srcs) != 3 || !srcs["cc-a"] || !srcs["cc-c"] || !srcs["cc-w"] {
+		t.Fatalf("dependent sources = %v, want {cc-a, cc-c, cc-w}", srcs)
+	}
+
+	// Count equals the distinct total (3), not the sum of two per-table COUNTs (4).
+	if n, err := store.CountDependentRecords(ctx, "cc-target", ""); err != nil {
+		t.Fatalf("CountDependentRecords: %v", err)
+	} else if n != 3 {
+		t.Fatalf("CountDependentRecords = %d, want 3 (distinct); a sum-of-counts would report 4", n)
+	}
+
+	// Keyset paging (size 1) is stable across the collision: 3 distinct sources,
+	// each once, no drop.
+	seen := map[string]bool{}
+	after := ""
+	for i := 0; i < 10; i++ {
+		page, err := store.GetDependentRecords(ctx, "cc-target", "", 1, after)
+		if err != nil {
+			t.Fatalf("page after %q: %v", after, err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		if len(page) != 1 {
+			t.Fatalf("page size = %d, want 1", len(page))
+		}
+		if seen[page[0].IssueID] {
+			t.Fatalf("duplicate source %q across pages (collision drop/dup)", page[0].IssueID)
+		}
+		seen[page[0].IssueID] = true
+		after = page[0].ID
+	}
+	if len(seen) != 3 || !seen["cc-a"] || !seen["cc-c"] || !seen["cc-w"] {
+		t.Fatalf("paged sources = %v, want 3 distinct {cc-a, cc-c, cc-w}", seen)
 	}
 }
 

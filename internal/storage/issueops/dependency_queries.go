@@ -170,6 +170,7 @@ func GetDependentRecordsInTx(ctx context.Context, tx DBTX, targetID, depType str
 	}
 
 	var all []*types.Dependency
+	seen := make(map[string]bool)
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
 		rows, err := queryDependentRecordsFromTable(ctx, tx, depTable, targetID, depType, limit, afterID)
 		if err != nil {
@@ -178,13 +179,29 @@ func GetDependentRecordsInTx(ctx context.Context, tx DBTX, targetID, depType str
 			}
 			return nil, err
 		}
-		all = append(all, rows...)
+		// De-dup by row id across the two tables. depid.New keys the id on
+		// (issue_id, target) and deliberately omits the table, so the SAME edge
+		// that lands in BOTH tables — a wisp promoted to durable, or two clones
+		// merged — carries ONE id in both. Appending the wisp copy would put a
+		// duplicate id in the page and, at a page boundary, drop it on the next
+		// `id > afterID`. We iterate durable first and skip an already-seen id,
+		// so a colliding edge is returned exactly once as its DURABLE row (the
+		// authoritative, non-ephemeral copy). Within a single table id is a
+		// PRIMARY KEY, so intra-table rows never collide.
+		for _, r := range rows {
+			if seen[r.ID] {
+				continue
+			}
+			seen[r.ID] = true
+			all = append(all, r)
+		}
 	}
 
-	// Merge the two per-table pages into one total order by row id. Each table
-	// returned its first `limit` rows with id > afterID, so the global first
-	// `limit` rows with id > afterID are all present; sorting by the globally
-	// unique id and truncating yields exactly that page with no drop and no dup.
+	// Merge the de-duped per-table pages into one total order by row id. Each
+	// table returned its first `limit` rows with id > afterID, so the global
+	// first `limit` DISTINCT ids > afterID are all present; sorting by the
+	// globally unique id and truncating yields exactly that page — no drop, no
+	// dup, and stable across a cross-table id collision.
 	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
 	if len(all) > limit {
 		all = all[:limit]
@@ -250,25 +267,64 @@ func scanDependentRow(rows *sql.Rows) (*types.Dependency, error) {
 	return &dep, nil
 }
 
-// CountDependentRecordsInTx returns the total number of inbound edges of
-// targetID across both dependency tables, applying the same sargable target
-// predicate and optional depType filter as GetDependentRecordsInTx but no
-// keyset/limit. R2's frozen envelope needs the TRUE total_members without paging
-// to exhaustion. Like the paged read it is a RAW count spanning both tables; the
-// caller applies any visibility policy separately.
+// CountDependentRecordsInTx returns the number of DISTINCT inbound edges of
+// targetID, applying the same sargable target predicate and optional depType
+// filter as GetDependentRecordsInTx but no keyset/limit. R2's frozen envelope
+// needs the TRUE total_members without paging to exhaustion. Like the paged read
+// it is a RAW count spanning both tables; the caller applies any visibility
+// policy separately.
+//
+// It must agree with GetDependentRecordsInTx's durable-preferred de-dup: an edge
+// present in BOTH tables (same depid) is ONE row in the page, so the count is
+// every durable row PLUS every wisp row whose depid is not already a durable row
+// for the same target/type. Summing two raw COUNT(*)s would over-count that edge
+// and exceed the distinct keyset row count.
 func CountDependentRecordsInTx(ctx context.Context, tx DBTX, targetID, depType string) (int, error) {
-	total := 0
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		n, err := countDependentRecordsFromTable(ctx, tx, depTable, targetID, depType)
-		if err != nil {
-			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
-				continue
-			}
-			return 0, err
-		}
-		total += n
+	durable, err := countDependentRecordsFromTable(ctx, tx, "dependencies", targetID, depType)
+	if err != nil {
+		return 0, err
 	}
-	return total, nil
+	wispExtra, err := countWispDependentsNotInDurableInTx(ctx, tx, targetID, depType)
+	if err != nil {
+		// wisp_dependencies absent: the durable count is the whole answer.
+		if isTableNotExistError(err) {
+			return durable, nil
+		}
+		return 0, err
+	}
+	return durable + wispExtra, nil
+}
+
+// countWispDependentsNotInDurableInTx counts wisp_dependencies rows whose target
+// is targetID (optional depType) but whose depid is NOT present in the durable
+// dependencies table for the same target/type — the wisp-ONLY inbound edges.
+// Colliding edges (present in both tables) are counted on the durable side, so
+// this is the exact complement that makes the total distinct-by-id. The NOT IN
+// subquery is uncorrelated and bounded by the target's durable inbound-edge
+// count; both arms use the sargable per-column OR target predicate.
+//
+//nolint:gosec // G201: table names are hardcoded constants; targetID/depType are bound as parameters.
+func countWispDependentsNotInDurableInTx(ctx context.Context, tx DBTX, targetID, depType string) (int, error) {
+	wispWhere := depTargetEqualsOr("")
+	durableWhere := depTargetEqualsOr("")
+	args := []any{targetID, targetID, targetID}
+	if depType != "" {
+		wispWhere += " AND type = ?"
+		args = append(args, depType)
+	}
+	args = append(args, targetID, targetID, targetID)
+	if depType != "" {
+		durableWhere += " AND type = ?"
+		args = append(args, depType)
+	}
+	query := fmt.Sprintf(
+		"SELECT COUNT(*) FROM wisp_dependencies WHERE %s AND id NOT IN (SELECT id FROM dependencies WHERE %s)",
+		wispWhere, durableWhere)
+	var n int
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count wisp-only dependent records: %w", err)
+	}
+	return n, nil
 }
 
 //nolint:gosec // G201: depTable is a hardcoded constant; targetID/depType are bound as parameters.
