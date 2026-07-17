@@ -142,16 +142,25 @@ const (
 // — the edges pointing AT targetID — from both the permanent and wisp
 // dependency tables. Unlike GetDependents/GetDependentsWithMetadata it does
 // NOT join or hydrate the source issues, so edges from dangling, cross-project,
-// or wisp sources are returned as raw rows rather than dropped. Rows are keyed
-// by their source issue_id (Dependency.IssueID); target resolution COALESCEs
-// the three typed target columns exactly like the source-keyed sibling reads.
+// or wisp sources are returned as raw rows rather than dropped. RAW READ: it
+// spans BOTH the `dependencies` and `wisp_dependencies` tables and applies no
+// visibility policy — filtering (e.g. the R2 group-membership visibility rule)
+// is the caller's job, applied at hydration.
 //
 // When depType is non-empty only rows of that dependency type are returned
-// ("" = all types). Results are ordered by source issue_id ASC and bounded by
-// limit (see the clamp constants). afterID is a keyset continuation over that
-// order: "" starts at the beginning, otherwise only rows with issue_id > afterID
-// are returned. The (issue_id, typed-target) unique keys make issue_id unique
-// among rows sharing a fixed target, so paging on it drops no rows.
+// ("" = all types). Results are ordered by the dependency row's primary id ASC
+// and bounded by limit (see the clamp constants). afterID is a keyset
+// continuation over that id order: "" starts at the beginning, otherwise only
+// rows with id > afterID are returned.
+//
+// CURSOR KEY: the dependency row's own id (depid.New(issue_id, target), a
+// UUIDv5 that is stable and globally unique across both tables) — NOT the source
+// issue_id. issue_id is not a total key for a fixed target: a source can appear
+// across the two scanned tables, so paging on it could drop or duplicate rows.
+// Paging on the unique row id is total, so each source's inbound edge is
+// returned exactly once. The target match is a sargable per-column OR over the
+// three typed columns (seeks idx_dep_*_target / the type composites) rather than
+// a COALESCE wrapper.
 func GetDependentRecordsInTx(ctx context.Context, tx DBTX, targetID, depType string, limit int, afterID string) ([]*types.Dependency, error) {
 	if limit <= 0 {
 		limit = defaultDependentRecordsLimit
@@ -172,16 +181,11 @@ func GetDependentRecordsInTx(ctx context.Context, tx DBTX, targetID, depType str
 		all = append(all, rows...)
 	}
 
-	// Merge the two per-table pages into one deterministic order. issue_id is
-	// unique per fixed target across both tables (durable vs wisp sources have
-	// disjoint ids), so ordering by (issue_id, type) is total; type is only a
-	// tie-break for the pathological same-source/same-target-string edge.
-	sort.Slice(all, func(i, j int) bool {
-		if all[i].IssueID != all[j].IssueID {
-			return all[i].IssueID < all[j].IssueID
-		}
-		return all[i].Type < all[j].Type
-	})
+	// Merge the two per-table pages into one total order by row id. Each table
+	// returned its first `limit` rows with id > afterID, so the global first
+	// `limit` rows with id > afterID are all present; sorting by the globally
+	// unique id and truncating yields exactly that page with no drop and no dup.
+	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
 	if len(all) > limit {
 		all = all[:limit]
 	}
@@ -191,19 +195,19 @@ func GetDependentRecordsInTx(ctx context.Context, tx DBTX, targetID, depType str
 //nolint:gosec // G201: depTable is a hardcoded constant; targetID/depType/afterID are bound as parameters.
 func queryDependentRecordsFromTable(ctx context.Context, tx DBTX, depTable, targetID, depType string, limit int, afterID string) ([]*types.Dependency, error) {
 	query := fmt.Sprintf(`
-		SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
+		SELECT id, issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
 		FROM %s
-		WHERE %s`, DepTargetExpr, depTable, depTargetEquals(""))
-	args := []any{targetID}
+		WHERE %s`, DepTargetExpr, depTable, depTargetEqualsOr(""))
+	args := []any{targetID, targetID, targetID}
 	if depType != "" {
 		query += " AND type = ?"
 		args = append(args, depType)
 	}
 	if afterID != "" {
-		query += " AND issue_id > ?"
+		query += " AND id > ?"
 		args = append(args, afterID)
 	}
-	query += fmt.Sprintf(" ORDER BY issue_id ASC LIMIT %d", limit)
+	query += fmt.Sprintf(" ORDER BY id ASC LIMIT %d", limit)
 
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -213,13 +217,73 @@ func queryDependentRecordsFromTable(ctx context.Context, tx DBTX, depTable, targ
 
 	var deps []*types.Dependency
 	for rows.Next() {
-		dep, scanErr := scanDependencyRow(rows)
+		dep, scanErr := scanDependentRow(rows)
 		if scanErr != nil {
 			return nil, fmt.Errorf("get dependent records: scan: %w", scanErr)
 		}
 		deps = append(deps, dep)
 	}
 	return deps, rows.Err()
+}
+
+// scanDependentRow scans a dependents row that INCLUDES the row id (the keyset
+// cursor). The shared scanDependencyRow does not select id, and adding it there
+// would ripple through every source-keyed read, so the target-keyed read owns
+// this variant.
+func scanDependentRow(rows *sql.Rows) (*types.Dependency, error) {
+	var dep types.Dependency
+	var createdAt sql.NullTime
+	var metadata, threadID sql.NullString
+
+	if err := rows.Scan(&dep.ID, &dep.IssueID, &dep.DependsOnID, &dep.Type, &createdAt, &dep.CreatedBy, &metadata, &threadID); err != nil {
+		return nil, fmt.Errorf("scan dependent: %w", err)
+	}
+	if createdAt.Valid {
+		dep.CreatedAt = createdAt.Time
+	}
+	if metadata.Valid {
+		dep.Metadata = metadata.String
+	}
+	if threadID.Valid {
+		dep.ThreadID = threadID.String
+	}
+	return &dep, nil
+}
+
+// CountDependentRecordsInTx returns the total number of inbound edges of
+// targetID across both dependency tables, applying the same sargable target
+// predicate and optional depType filter as GetDependentRecordsInTx but no
+// keyset/limit. R2's frozen envelope needs the TRUE total_members without paging
+// to exhaustion. Like the paged read it is a RAW count spanning both tables; the
+// caller applies any visibility policy separately.
+func CountDependentRecordsInTx(ctx context.Context, tx DBTX, targetID, depType string) (int, error) {
+	total := 0
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		n, err := countDependentRecordsFromTable(ctx, tx, depTable, targetID, depType)
+		if err != nil {
+			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+				continue
+			}
+			return 0, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+//nolint:gosec // G201: depTable is a hardcoded constant; targetID/depType are bound as parameters.
+func countDependentRecordsFromTable(ctx context.Context, tx DBTX, depTable, targetID, depType string) (int, error) {
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s", depTable, depTargetEqualsOr(""))
+	args := []any{targetID, targetID, targetID}
+	if depType != "" {
+		query += " AND type = ?"
+		args = append(args, depType)
+	}
+	var n int
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count dependent records from %s: %w", depTable, err)
+	}
+	return n, nil
 }
 
 func GetDependencyCountsInTx(ctx context.Context, tx DBTX, issueIDs []string) (map[string]*types.DependencyCounts, error) {

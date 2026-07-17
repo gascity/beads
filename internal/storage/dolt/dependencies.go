@@ -227,6 +227,18 @@ func (s *DoltStore) GetDependentRecords(ctx context.Context, targetID string, de
 	return result, err
 }
 
+// CountDependentRecords returns the total inbound-edge count of targetID across
+// both dependency tables. Delegates to issueops.CountDependentRecordsInTx.
+func (s *DoltStore) CountDependentRecords(ctx context.Context, targetID string, depType string) (int, error) {
+	var n int
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		n, err = issueops.CountDependentRecordsInTx(ctx, tx, targetID, depType)
+		return err
+	})
+	return n, err
+}
+
 // GetAllDependencyRecords returns all dependency records.
 // Delegates to issueops.GetAllDependencyRecordsInTx for shared query logic.
 func (s *DoltStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {

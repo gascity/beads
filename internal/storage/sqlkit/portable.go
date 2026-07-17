@@ -106,7 +106,8 @@ func (s *Store) GetAllDependencyRecords(ctx context.Context) (map[string][]*type
 }
 
 // GetDependentRecords returns raw dependency rows whose target is targetID,
-// without hydrating the source issues. Delegates to shared query logic.
+// without hydrating the source issues. Delegates to shared query logic; the
+// dialect translates the SQL.
 func (s *Store) GetDependentRecords(ctx context.Context, targetID string, depType string, limit int, afterID string) ([]*types.Dependency, error) {
 	var out []*types.Dependency
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
@@ -115,6 +116,18 @@ func (s *Store) GetDependentRecords(ctx context.Context, targetID string, depTyp
 		return e
 	})
 	return out, err
+}
+
+// CountDependentRecords returns the total inbound-edge count of targetID across
+// both dependency tables. Delegates to issueops.CountDependentRecordsInTx.
+func (s *Store) CountDependentRecords(ctx context.Context, targetID string, depType string) (int, error) {
+	var n int
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var e error
+		n, e = issueops.CountDependentRecordsInTx(ctx, tx, targetID, depType)
+		return e
+	})
+	return n, err
 }
 
 func (s *Store) IterAllDependencyRecords(ctx context.Context) (storage.Iter[types.Dependency], error) {

@@ -830,6 +830,18 @@ func (s *EmbeddedDoltStore) GetDependentRecords(ctx context.Context, targetID st
 	return result, err
 }
 
+// CountDependentRecords returns the total inbound-edge count of targetID across
+// both dependency tables. Delegates to issueops.CountDependentRecordsInTx.
+func (s *EmbeddedDoltStore) CountDependentRecords(ctx context.Context, targetID string, depType string) (int, error) {
+	var n int
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		n, err = issueops.CountDependentRecordsInTx(ctx, tx, targetID, depType)
+		return err
+	})
+	return n, err
+}
+
 // IsBlocked is implemented in issues.go.
 
 // GetNewlyUnblockedByClose is implemented in issues.go.
