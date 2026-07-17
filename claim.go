@@ -56,23 +56,28 @@ func ParseClaimConflict(err error) (ClaimConflict, bool) {
 	}
 }
 
-// tailAfter returns the substring following the last occurrence of marker in s,
-// or "" when marker is absent.
+// tailAfter returns the bounded token following the last occurrence of marker in
+// s, or "" when marker is absent or the token cannot be recovered unambiguously.
 //
-// The recovered token (assignee/status) is the message's trailing run BY REPO
-// CONVENTION: claim-error wraps PREPEND context ("caller ctx: %w"), never append
-// it, so the fragment appears once near the end and its tail is the bare token.
-// As a guard against a future appended wrap corrupting the token, if the tail
-// still contains a known claim marker we treat it as ambiguous and return "" —
-// a recovered-empty field is the documented best-effort failure mode, and the
-// round-trip test would go red before any garbage token could reach a caller.
+// The recovered token (assignee/status) is a single whitespace-free run by the
+// producer's construction: the fragment is the last thing before the bare token,
+// and claim-error wraps PREPEND context ("caller ctx: %w"), never append it, so
+// in the well-formed case the tail is exactly the token. If the tail carries
+// trailing content — whitespace, an appended "(...)" wrap, or a further embedded
+// marker (all of which contain a space or a paren) — we cannot separate the
+// token from the wrap, so we return "". A recovered-empty field is the
+// documented best-effort failure mode (ParseClaimConflict still reports ok=true
+// on the errors.Is match); a status never contains whitespace and an assignee is
+// an actor id that by convention does not either, so a clean conflict is
+// unaffected. This bound also stops a plain appended suffix — which the old
+// "contains another full marker" guard missed — from leaking a garbage token.
 func tailAfter(s, marker string) string {
 	i := strings.LastIndex(s, marker)
 	if i < 0 {
 		return ""
 	}
 	tail := s[i+len(marker):]
-	if strings.Contains(tail, alreadyClaimedMarker) || strings.Contains(tail, notClaimableMarker) {
+	if strings.ContainsAny(tail, " \t\r\n(") {
 		return ""
 	}
 	return tail

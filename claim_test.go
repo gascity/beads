@@ -95,4 +95,42 @@ func TestParseClaimConflict(t *testing.T) {
 			t.Errorf("CurrentAssignee = %q, want empty for unparseable message", got.CurrentAssignee)
 		}
 	})
+
+	t.Run("appended wrap yields empty field but still ok", func(t *testing.T) {
+		t.Parallel()
+		// A wrap APPENDED after the assignee (not the repo-convention prepend) is
+		// ambiguous, so the field comes back empty — best-effort — while ok stays
+		// true because it is still an ErrAlreadyClaimed match.
+		err := fmt.Errorf("%w (context appended)", fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, "alice"))
+		got, ok := ParseClaimConflict(err)
+		if !ok {
+			t.Fatalf("ParseClaimConflict returned ok=false for an appended-wrap ErrAlreadyClaimed")
+		}
+		if got.CurrentAssignee != "" {
+			t.Errorf("CurrentAssignee = %q, want empty on an appended-wrap message", got.CurrentAssignee)
+		}
+	})
+}
+
+// TestTailAfterBoundsTheToken pins the token-recovery boundary directly: a clean
+// token and a prepended wrap recover the bare token; an appended suffix (space or
+// "(...)" wrap) is rejected to "" rather than leaking a corrupted token.
+func TestTailAfterBoundsTheToken(t *testing.T) {
+	t.Parallel()
+	m := alreadyClaimedMarker // "issue already claimed by "
+	cases := []struct {
+		name, in, want string
+	}{
+		{"clean token", m + "alice", "alice"},
+		{"prepended wrap", "claim dr-1: " + m + "alice", "alice"},
+		{"appended paren wrap", m + "alice (from ctx)", ""},
+		{"appended space suffix", m + "alice then boom", ""},
+		{"marker absent", "unrelated error", ""},
+		{"empty token", m, ""},
+	}
+	for _, c := range cases {
+		if got := tailAfter(c.in, m); got != c.want {
+			t.Errorf("%s: tailAfter(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
 }
