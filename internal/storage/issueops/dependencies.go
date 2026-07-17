@@ -48,7 +48,7 @@ func depTargetEquals(alias string) string {
 	return depTargetExpr(alias) + " = ?"
 }
 
-// depTargetEqualsOr returns a SARGABLE target-equality predicate as an explicit
+// DepTargetEqualsOr returns a SARGABLE target-equality predicate as an explicit
 // per-column OR — `(depends_on_issue_id = ? OR depends_on_wisp_id = ? OR
 // depends_on_external = ?)` — binding the target id once per typed column (three
 // args, in that column order). Unlike depTargetEquals's COALESCE wrapper (which
@@ -62,7 +62,11 @@ func depTargetEquals(alias string) string {
 // so the un-ordered COUNT still scans, but the COALESCE form never had any index
 // path either; the type-filtered path seeks the (type, target) composite on both.
 // Use it for target-keyed reads of a single fixed target.
-func depTargetEqualsOr(alias string) string {
+//
+// Exported so the backend sargability guards (e.g. the Postgres EXPLAIN test)
+// assert the production predicate rather than a hand-copied literal — a change
+// here then breaks the guard.
+func DepTargetEqualsOr(alias string) string {
 	if alias == "" {
 		return "(depends_on_issue_id = ? OR depends_on_wisp_id = ? OR depends_on_external = ?)"
 	}

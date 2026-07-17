@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/pgdialect"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -220,7 +221,11 @@ func TestDependentTargetPredicateSargablePostgres(t *testing.T) {
 		return sb.String()
 	}
 
-	orPlan := explain(`(depends_on_issue_id = 'tgt' OR depends_on_wisp_id = 'tgt' OR depends_on_external = 'tgt')`)
+	// Single-source the predicate under test from production: the sargable
+	// per-column OR is issueops.DepTargetEqualsOr, whose three ? placeholders we
+	// bind to the same literal 'tgt' for the plan. A revert to a COALESCE wrapper
+	// there breaks this guard.
+	orPlan := explain(literalizeParams(issueops.DepTargetEqualsOr(""), "'tgt'", "'tgt'", "'tgt'"))
 	if !strings.Contains(orPlan, "Bitmap") && !strings.Contains(orPlan, "Index") {
 		t.Fatalf("per-column OR target predicate is not sargable (want BitmapOr/Index scan), plan:\n%s", orPlan)
 	}
@@ -228,11 +233,29 @@ func TestDependentTargetPredicateSargablePostgres(t *testing.T) {
 		t.Fatalf("per-column OR target predicate regressed to a Seq Scan:\n%s", orPlan)
 	}
 
-	// Contrast: the old COALESCE wrapper is NOT sargable (Seq Scan). This is the
-	// concrete before/after — if a future change reverts to COALESCE this stays
-	// a Seq Scan and the OR assertion above would too.
-	coalescePlan := explain(`COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = 'tgt'`)
+	// Contrast: the old COALESCE wrapper (issueops.DepTargetExpr) is NOT sargable
+	// (Seq Scan). This is the concrete before/after — if a future change reverts
+	// the predicate to COALESCE this stays a Seq Scan and the OR assertion above
+	// would too.
+	coalescePlan := explain(issueops.DepTargetExpr + ` = 'tgt'`)
 	if !strings.Contains(coalescePlan, "Seq Scan") {
 		t.Logf("note: COALESCE form no longer Seq Scans on this PG version; plan:\n%s", coalescePlan)
 	}
+}
+
+// literalizeParams replaces each ? placeholder in query, in order, with the
+// corresponding literal — for EXPLAINing a production ?-bound predicate whose
+// planner shape is under test. It panics on an arity mismatch so a drifted
+// placeholder count fails loudly rather than EXPLAINing malformed SQL.
+func literalizeParams(query string, literals ...string) string {
+	for _, lit := range literals {
+		if !strings.Contains(query, "?") {
+			panic("literalizeParams: more literals than ? placeholders in query")
+		}
+		query = strings.Replace(query, "?", lit, 1)
+	}
+	if strings.Contains(query, "?") {
+		panic("literalizeParams: unbound ? placeholder(s) remain in query")
+	}
+	return query
 }

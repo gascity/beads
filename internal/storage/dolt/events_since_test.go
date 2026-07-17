@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -297,13 +298,13 @@ func TestEventsSincePlanIsIndexed(t *testing.T) {
 	}
 
 	const cur = "2023-01-01 00:00:00"
-	// Mirror EventsSinceInTx's SARGABLE predicate with literals.
-	plan := explainPlan(t, ctx, store.db, `
-		SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
-		FROM events
-		WHERE created_at >= '`+cur+`' AND ((created_at > '`+cur+`') OR (id > ''))
-		ORDER BY created_at ASC, id ASC
-		LIMIT 100`)
+	// Single-source the guarded SQL from production: EXPLAIN the exact string
+	// EventsSinceInTx runs (issueID="" => three ? placeholders: the created_at
+	// lower bound, the strict created_at, and the id tie-break), with the
+	// placeholders replaced by literals for the plan. A change to the SARGABLE
+	// predicate in issueops.EventsSinceQuery then breaks this guard.
+	prod := issueops.EventsSinceQuery("", 100)
+	plan := explainPlan(t, ctx, store.db, literalizeParams(prod, "'"+cur+"'", "'"+cur+"'", "''"))
 
 	if !looksLikeDoltPlan(plan) {
 		t.Skipf("EXPLAIN output not in a recognized Dolt plan format, skipping sargability assertion; plan=\n%s", plan)
@@ -311,6 +312,23 @@ func TestEventsSincePlanIsIndexed(t *testing.T) {
 	if !strings.Contains(plan, "IndexedTableAccess") || !strings.Contains(plan, "events.created_at") {
 		t.Fatalf("EventsSince predicate does not seek idx_events_created_at (want IndexedTableAccess on [events.created_at]) — the sargable lower bound regressed to a full Table scan.\nplan:\n%s", plan)
 	}
+}
+
+// literalizeParams replaces each ? placeholder in query, in order, with the
+// corresponding literal — for EXPLAINing a production ?-bound SQL string whose
+// planner shape is under test. It intentionally panics on an arity mismatch so a
+// drifted placeholder count fails loudly rather than EXPLAINing malformed SQL.
+func literalizeParams(query string, literals ...string) string {
+	for _, lit := range literals {
+		if !strings.Contains(query, "?") {
+			panic("literalizeParams: more literals than ? placeholders in query")
+		}
+		query = strings.Replace(query, "?", lit, 1)
+	}
+	if strings.Contains(query, "?") {
+		panic("literalizeParams: unbound ? placeholder(s) remain in query")
+	}
+	return query
 }
 
 // explainPlan runs EXPLAIN FORMAT=TREE <query> and joins the plan tree into one

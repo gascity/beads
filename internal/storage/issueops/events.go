@@ -96,17 +96,11 @@ func EventsSinceInTx(ctx context.Context, tx DBTX, cursorCreatedAt time.Time, cu
 		limit = maxEventsSinceLimit
 	}
 
-	query := `
-		SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
-		FROM events
-		WHERE created_at >= ? AND ((created_at > ?) OR (id > ?))`
+	query := EventsSinceQuery(issueID, limit)
 	args := []any{cursorCreatedAt, cursorCreatedAt, cursorID}
 	if issueID != "" {
-		query += " AND issue_id = ?"
 		args = append(args, issueID)
 	}
-	//nolint:gosec // G201: limit is an int clamped above; all values are bound parameters.
-	query += fmt.Sprintf(" ORDER BY created_at ASC, id ASC LIMIT %d", limit)
 
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -115,6 +109,27 @@ func EventsSinceInTx(ctx context.Context, tx DBTX, cursorCreatedAt time.Time, cu
 	defer rows.Close()
 
 	return scanEvents(rows)
+}
+
+// EventsSinceQuery returns the exact SQL EventsSinceInTx executes for the given
+// issueID scope and already-clamped limit, with ? placeholders bound in order by
+// the caller: created_at (sargable lower bound), created_at (strict), id
+// (same-second tie-break), and issue_id when issueID != "". It is exported so
+// the backend sargability guard EXPLAINs this production string rather than a
+// hand-copied literal — a change to the SARGABLE predicate here then breaks the
+// guard.
+//
+//nolint:gosec // G201: limit is an int the caller clamps; every runtime value is a bound parameter.
+func EventsSinceQuery(issueID string, limit int) string {
+	query := `
+		SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
+		FROM events
+		WHERE created_at >= ? AND ((created_at > ?) OR (id > ?))`
+	if issueID != "" {
+		query += " AND issue_id = ?"
+	}
+	query += fmt.Sprintf(" ORDER BY created_at ASC, id ASC LIMIT %d", limit)
+	return query
 }
 
 func scanEvents(rows *sql.Rows) ([]*types.Event, error) {
