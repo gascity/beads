@@ -79,3 +79,53 @@ func TestIsBlockedBatch(t *testing.T) {
 		t.Fatalf("IsBlockedBatch returned an entry for a missing id: %v", miss)
 	}
 }
+
+// TestIsBlockedBatchCrossTableCollisionMatchesSingle locks in the R1/R3
+// resolution parity: when the SAME id lives in BOTH the issues and wisps tables
+// with DIFFERENT is_blocked values (a data anomaly), the batch read
+// (IsBlockedBatch, used by R3) must resolve the shared is_blocked field the same
+// way the per-row read (IsBlocked, used by R1) does. IsBlockedInTx scans
+// issues→wisps and breaks on the first table that has the id, so ISSUES wins;
+// the batch must agree. Before the fix the batch preferred the wisps row and the
+// two reads disagreed on the same stored flag.
+func TestIsBlockedBatchCrossTableCollisionMatchesSingle(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const id = "ib-collide"
+
+	// issues row: is_blocked = 1 (blocked).
+	createPerm(t, ctx, store, id)
+	if _, err := store.execContext(ctx, "UPDATE issues SET is_blocked = 1 WHERE id = ?", id); err != nil {
+		t.Fatalf("set issues.is_blocked: %v", err)
+	}
+
+	// wisps row with the SAME id but is_blocked = 0 (not blocked) — the collision.
+	if _, err := store.execContext(ctx, `
+		INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, ephemeral, is_blocked)
+		VALUES (?, ?, '', '', '', '', ?, ?, ?, ?, ?)
+	`, id, "wisp collide", types.StatusOpen, 2, types.TypeTask, true, 0); err != nil {
+		t.Fatalf("insert colliding wisp row: %v", err)
+	}
+
+	single, _, err := store.IsBlocked(ctx, id)
+	if err != nil {
+		t.Fatalf("IsBlocked(%s): %v", id, err)
+	}
+	batch, err := store.IsBlockedBatch(ctx, []string{id})
+	if err != nil {
+		t.Fatalf("IsBlockedBatch(%s): %v", id, err)
+	}
+
+	// The two reads must agree on the shared is_blocked field.
+	if single != batch[id] {
+		t.Fatalf("collision divergence: IsBlocked(%s) = %v, IsBlockedBatch[%s] = %v — must agree", id, single, id, batch[id])
+	}
+	// And the agreed value must be the ISSUES-table value (issues-wins), matching
+	// IsBlockedInTx's issues→wisps break order.
+	if !single {
+		t.Fatalf("IsBlocked(%s) = false, want true (issues-wins: issues.is_blocked = 1)", id)
+	}
+}

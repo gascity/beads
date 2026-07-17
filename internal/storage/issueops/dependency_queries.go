@@ -908,8 +908,12 @@ func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string
 // at queryBatchSize, so it reflects inherited/ancestor blockedness (a child of a
 // blocked parent has is_blocked=1 with no direct blocking edge of its own) with
 // no graph walk. ids missing from both tables are absent from the map (callers
-// treat absent as not-blocked). On a cross-table id collision the wisps row wins,
-// matching loadStatusByIDInTx and the search wisp-merge.
+// treat absent as not-blocked). On a cross-table id collision the ISSUES row wins,
+// matching IsBlockedInTx exactly: the single read scans issues→wisps and breaks on
+// the first table that has the id, so the batch keeps the first-seen (issues) value
+// and skips any later (wisps) duplicate. The two reads share the is_blocked field,
+// so they must resolve a collision identically — this is a data anomaly, but R1
+// (single) and R3 (batch) would otherwise disagree on the same stored flag.
 //
 //nolint:gosec // G201: table is a hardcoded "issues" or "wisps".
 func IsBlockedBatchInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
@@ -941,9 +945,12 @@ func IsBlockedBatchInTx(ctx context.Context, tx DBTX, ids []string) (map[string]
 					_ = rows.Close()
 					return nil, fmt.Errorf("scan is_blocked from %s: %w", table, err)
 				}
-				// Tables iterate issues→wisps, so a second encounter is the
-				// wisps row, which is canonical on a cross-table dup (be-iabdi).
-				if _, dup := seen[id]; dup && table != "wisps" {
+				// Tables iterate issues→wisps and IsBlockedInTx breaks on the
+				// first table that has the id (issues first) — so ISSUES wins on
+				// a cross-table id collision. Keep the first-seen value and skip
+				// any later (wisps) duplicate, so the batch is_blocked matches
+				// per-row IsBlocked exactly on the shared field.
+				if _, dup := seen[id]; dup {
 					continue
 				}
 				seen[id] = table
