@@ -67,15 +67,28 @@ const (
 
 // EventsSinceInTx returns durable events strictly after the (createdAt, id)
 // keyset cursor, ordered by (created_at ASC, id ASC) and bounded by limit.
+// issueID != "" scopes the feed to one bead's history; "" returns all issues'.
 //
-// The cursor predicate `(created_at > ?) OR (created_at = ? AND id > ?)`
-// excludes the cursor row itself and orders same-second ties by id, so a
-// caller can page forward by feeding the last returned event's CreatedAt/ID
-// back in. The zero cursor (zero time, empty id) starts from the epoch.
+// The cursor predicate is written as
+//
+//	created_at >= ? AND ((created_at > ?) OR (id > ?))
+//
+// which is logically the keyset "(created_at, id) > (cursor)" but SARGABLE: the
+// redundant `created_at >= ?` lower bound lets the planner seek
+// idx_events_created_at (an IndexedTableAccess range) instead of full-scanning
+// and filtering — the bare OR form plans as Table+Filter+TopN on Dolt. The
+// nested OR then re-applies strict exclusion (drop the cursor row) and the
+// same-second id tie-break. All three placeholders bind the cursor: the time
+// twice, then the id. The zero cursor (zero time, empty id) starts from epoch.
+//
+// With issueID set an additional `issue_id = ?` is ANDed in. There is no
+// composite (issue_id, created_at, id) index, so that arm is a single-column
+// index seek (idx_events_issue) plus a filter; acceptable for a per-bead drawer,
+// which is small.
 //
 // Scope is the durable `events` table only — wisp_events are deliberately not
 // unioned in, unlike GetAllEventsSince, so the feed stays durable-only.
-func EventsSinceInTx(ctx context.Context, tx *sql.Tx, cursorCreatedAt time.Time, cursorID string, limit int) ([]*types.Event, error) {
+func EventsSinceInTx(ctx context.Context, tx DBTX, cursorCreatedAt time.Time, cursorID, issueID string, limit int) ([]*types.Event, error) {
 	if limit <= 0 {
 		limit = defaultEventsSinceLimit
 	}
@@ -83,15 +96,21 @@ func EventsSinceInTx(ctx context.Context, tx *sql.Tx, cursorCreatedAt time.Time,
 		limit = maxEventsSinceLimit
 	}
 
-	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+	query := `
 		SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
 		FROM events
-		WHERE (created_at > ?) OR (created_at = ? AND id > ?)
-		ORDER BY created_at ASC, id ASC
-		LIMIT %d
-	`, limit), cursorCreatedAt, cursorCreatedAt, cursorID)
+		WHERE created_at >= ? AND ((created_at > ?) OR (id > ?))`
+	args := []any{cursorCreatedAt, cursorCreatedAt, cursorID}
+	if issueID != "" {
+		query += " AND issue_id = ?"
+		args = append(args, issueID)
+	}
+	//nolint:gosec // G201: limit is an int clamped above; all values are bound parameters.
+	query += fmt.Sprintf(" ORDER BY created_at ASC, id ASC LIMIT %d", limit)
+
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("events since cursor (%v, %q): %w", cursorCreatedAt, cursorID, err)
+		return nil, fmt.Errorf("events since cursor (%v, %q) issue %q: %w", cursorCreatedAt, cursorID, issueID, err)
 	}
 	defer rows.Close()
 

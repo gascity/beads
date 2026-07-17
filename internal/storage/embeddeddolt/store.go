@@ -526,11 +526,12 @@ func (s *EmbeddedDoltStore) GetAllEventsSince(ctx context.Context, since time.Ti
 
 // EventsSince returns durable events strictly after the keyset cursor, ordered
 // by (created_at ASC, id ASC) and bounded by limit. Durable events table only.
-func (s *EmbeddedDoltStore) EventsSince(ctx context.Context, cursor storage.EventCursor, limit int) ([]*types.Event, error) {
+// issueID != "" scopes the feed to one bead's history.
+func (s *EmbeddedDoltStore) EventsSince(ctx context.Context, cursor storage.EventCursor, issueID string, limit int) ([]*types.Event, error) {
 	var result []*types.Event
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.EventsSinceInTx(ctx, tx, cursor.CreatedAt, cursor.ID, limit)
+		result, err = issueops.EventsSinceInTx(ctx, tx, cursor.CreatedAt, cursor.ID, issueID, limit)
 		return err
 	})
 	return result, err

@@ -624,7 +624,7 @@ func (unsupportedDoltStorage) CountDependentsByStatus(_ context.Context, _ strin
 	return
 }
 
-func (unsupportedDoltStorage) EventsSince(_ context.Context, _ storage.EventCursor, _ int) (_ []*types.Event, err error) {
+func (unsupportedDoltStorage) EventsSince(_ context.Context, _ storage.EventCursor, _ string, _ int) (_ []*types.Event, err error) {
 	err = errUnsupported("EventsSince")
 	return
 }
