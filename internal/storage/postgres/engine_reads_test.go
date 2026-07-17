@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/pgdialect"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -245,6 +246,213 @@ func TestDependentTargetPredicateSargablePostgres(t *testing.T) {
 	coalescePlan := explain(issueops.DepTargetExpr + ` = 'tgt'`)
 	if !strings.Contains(coalescePlan, "Seq Scan") {
 		t.Logf("note: COALESCE form no longer Seq Scans on this PG version; plan:\n%s", coalescePlan)
+	}
+}
+
+// TestSearchIssuesKeysetPostgres exercises the §13.12 (created_at DESC, id ASC)
+// keyset end-to-end on a live Postgres store via the public SearchIssues, proving
+// the shared sqlbuild predicate + pg dialect page a same-second group larger than
+// a page completely, with no drop/dup.
+func TestSearchIssuesKeysetPostgres(t *testing.T) {
+	st, _ := newEngineReadsStore(t)
+	ctx := context.Background()
+
+	base := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	seeds := []struct {
+		id string
+		at time.Time
+	}{
+		{"k-newer", base.Add(time.Second)},
+		{"k-a1", base}, {"k-a2", base}, {"k-a3", base}, {"k-a4", base}, {"k-a5", base},
+		{"k-older", base.Add(-time.Second)},
+	}
+	for _, s := range seeds {
+		iss := &types.Issue{ID: s.id, Title: s.id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedBy: "tester", CreatedAt: s.at}
+		if err := st.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", s.id, err)
+		}
+	}
+
+	want := []string{"k-newer", "k-a1", "k-a2", "k-a3", "k-a4", "k-a5", "k-older"}
+	ids := func(issues []*types.Issue) []string {
+		out := make([]string, len(issues))
+		for i, iss := range issues {
+			out[i] = iss.ID
+		}
+		return out
+	}
+	eq := func(got, exp []string) bool {
+		if len(got) != len(exp) {
+			return false
+		}
+		for i := range exp {
+			if got[i] != exp[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	full, err := st.SearchIssues(ctx, "", types.IssueFilter{IDPrefix: "k-", SkipWisps: true, SortBy: "created", Limit: 100})
+	if err != nil {
+		t.Fatalf("SearchIssues(full): %v", err)
+	}
+	if got := ids(full); !eq(got, want) {
+		t.Fatalf("full order = %v, want %v", got, want)
+	}
+
+	const pageSize = 2
+	var collected []string
+	seen := map[string]bool{}
+	var afterCreatedAt *time.Time
+	afterID := ""
+	for i := 0; i < 100; i++ {
+		page, err := st.SearchIssues(ctx, "", types.IssueFilter{
+			IDPrefix: "k-", SkipWisps: true, SortBy: "created", Limit: pageSize,
+			AfterCreatedAt: afterCreatedAt, AfterID: afterID,
+		})
+		if err != nil {
+			t.Fatalf("SearchIssues(page %d): %v", i, err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, iss := range page {
+			if seen[iss.ID] {
+				t.Fatalf("duplicate id %q across pages — same-second overflow lost", iss.ID)
+			}
+			seen[iss.ID] = true
+			collected = append(collected, iss.ID)
+		}
+		last := page[len(page)-1]
+		at := last.CreatedAt.UTC()
+		afterCreatedAt = &at
+		afterID = last.ID
+	}
+	if !eq(collected, want) {
+		t.Fatalf("keyset paged order = %v, want %v (no drop/dup)", collected, want)
+	}
+}
+
+// TestIsBlockedBatchPostgres is the §13.7 parity regression on the live Postgres
+// backend: the batch transitive is_blocked read agrees with per-row IsBlocked and
+// reflects inherited blockedness with an empty direct-blocker set.
+func TestIsBlockedBatchPostgres(t *testing.T) {
+	st, _ := newEngineReadsStore(t)
+	ctx := context.Background()
+
+	mk := func(id string) {
+		iss := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedBy: "tester"}
+		if err := st.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	add := func(src, tgt string, typ types.DependencyType) {
+		if err := st.AddDependency(ctx, &types.Dependency{IssueID: src, DependsOnID: tgt, Type: typ, CreatedBy: "tester"}, "tester"); err != nil {
+			t.Fatalf("add dep %s->%s: %v", src, tgt, err)
+		}
+	}
+	mk("ib-blk")
+	mk("ib-parent")
+	add("ib-parent", "ib-blk", types.DepBlocks)
+	mk("ib-child")
+	add("ib-child", "ib-parent", types.DepParentChild)
+	mk("ib-free")
+
+	ids := []string{"ib-blk", "ib-parent", "ib-child", "ib-free"}
+	batch, err := st.IsBlockedBatch(ctx, ids)
+	if err != nil {
+		t.Fatalf("IsBlockedBatch: %v", err)
+	}
+	for _, id := range ids {
+		want, _, err := st.IsBlocked(ctx, id)
+		if err != nil {
+			t.Fatalf("IsBlocked(%s): %v", id, err)
+		}
+		if batch[id] != want {
+			t.Fatalf("IsBlockedBatch[%s] = %v, want %v (per-row IsBlocked)", id, batch[id], want)
+		}
+	}
+	blocked, blockers, err := st.IsBlocked(ctx, "ib-child")
+	if err != nil {
+		t.Fatalf("IsBlocked(ib-child): %v", err)
+	}
+	if !blocked || len(blockers) != 0 {
+		t.Fatalf("ib-child IsBlocked = (%v, %v), want (true, []) — inherited block, empty direct blockers", blocked, blockers)
+	}
+	if !batch["ib-child"] || !batch["ib-parent"] || batch["ib-free"] {
+		t.Fatalf("IsBlockedBatch = %v, want child+parent true, free false", batch)
+	}
+}
+
+// TestKeysetPredicateSargablePostgres is the §13.12 sargability guard on the
+// hosted backend: the keyset predicate must plan as an index/BitmapOr scan
+// (sargable) rather than a Seq Scan. It builds a volume-populated synthetic table
+// with a created_at index, then EXPLAINs the production predicate (single-sourced
+// from sqlbuild.KeysetCreatedAtIDPredicate) with a selective cursor low in the
+// range so the planner prefers the index.
+func TestKeysetPredicateSargablePostgres(t *testing.T) {
+	url := os.Getenv("BEADS_PG_TEST_URL")
+	if url == "" {
+		t.Skip("BEADS_PG_TEST_URL not set; skipping Postgres keyset sargability EXPLAIN")
+	}
+	schema := fmt.Sprintf("kssarg_%d", time.Now().UnixNano())
+	raw, err := pgdialect.OpenRaw(url, schema)
+	if err != nil {
+		t.Fatalf("OpenRaw: %v", err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	ctx := context.Background()
+	if _, err := raw.ExecContext(ctx, fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %q`, schema)); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = raw.ExecContext(context.Background(), fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, schema))
+	})
+	setup := []string{
+		`CREATE TABLE issue_probe (id text PRIMARY KEY, created_at timestamptz NOT NULL)`,
+		`CREATE INDEX idx_ip_created_at ON issue_probe (created_at)`,
+		// 5000 rows spread across an hour; only a small early slice satisfies a
+		// low cursor, so the planner prefers the index over a Seq Scan.
+		`INSERT INTO issue_probe (id, created_at)
+			SELECT 'id-'||g, TIMESTAMPTZ '2024-01-01 00:00:00Z' + (g || ' seconds')::interval
+			FROM generate_series(1,5000) g`,
+		`ANALYZE issue_probe`,
+	}
+	for _, s := range setup {
+		if _, err := raw.ExecContext(ctx, s); err != nil {
+			t.Fatalf("setup %q: %v", s, err)
+		}
+	}
+
+	explain := func(where string) string {
+		rows, err := raw.QueryContext(ctx, "EXPLAIN SELECT id FROM issue_probe WHERE "+where+" ORDER BY created_at DESC, id ASC LIMIT 100")
+		if err != nil {
+			t.Fatalf("EXPLAIN: %v", err)
+		}
+		defer rows.Close()
+		var sb strings.Builder
+		for rows.Next() {
+			var line sql.NullString
+			if err := rows.Scan(&line); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			if line.Valid {
+				sb.WriteString(line.String)
+				sb.WriteString("\n")
+			}
+		}
+		return sb.String()
+	}
+
+	// Selective cursor: 10 seconds into the range → ~10 of 5000 rows qualify.
+	const cur = "'2024-01-01 00:00:10Z'"
+	plan := explain(literalizeParams(sqlbuild.KeysetCreatedAtIDPredicate, cur, cur, "''"))
+	if !strings.Contains(plan, "Index") && !strings.Contains(plan, "Bitmap") {
+		t.Fatalf("keyset predicate is not sargable (want Index/Bitmap scan on idx_ip_created_at), plan:\n%s", plan)
+	}
+	if strings.Contains(plan, "Seq Scan") {
+		t.Fatalf("keyset predicate regressed to a Seq Scan:\n%s", plan)
 	}
 }
 
