@@ -36,6 +36,22 @@ func (s *Store) IsBlocked(ctx context.Context, issueID string) (bool, []string, 
 	return blocked, blockers, nil
 }
 
+// IsBlockedBatch returns the denormalized transitive is_blocked flag for each id
+// in one batched read. Delegates to issueops.IsBlockedBatchInTx; the dialect
+// translates the SQL.
+func (s *Store) IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error) {
+	var result map[string]bool
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var e error
+		result, e = issueops.IsBlockedBatchInTx(ctx, tx, ids)
+		return e
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // GetNewlyUnblockedByClose finds issues that become unblocked when closedIssueID
 // is closed.
 func (s *Store) GetNewlyUnblockedByClose(ctx context.Context, closedIssueID string) ([]*types.Issue, error) {

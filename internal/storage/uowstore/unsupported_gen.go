@@ -604,6 +604,11 @@ func (unsupportedDoltStorage) IsBlocked(_ context.Context, _ string) (_ bool, _ 
 	return
 }
 
+func (unsupportedDoltStorage) IsBlockedBatch(_ context.Context, _ []string) (_ map[string]bool, err error) {
+	err = errUnsupported("IsBlockedBatch")
+	return
+}
+
 func (unsupportedDoltStorage) GetNewlyUnblockedByClose(_ context.Context, _ string) (_ []*types.Issue, err error) {
 	err = errUnsupported("GetNewlyUnblockedByClose")
 	return

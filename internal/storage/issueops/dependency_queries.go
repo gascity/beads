@@ -901,6 +901,63 @@ func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string
 	return true, blockers, nil
 }
 
+// IsBlockedBatchInTx returns the denormalized, TRANSITIVE is_blocked flag for
+// each of ids in one batched read — the same value IsBlockedInTx returns per id,
+// without the per-row blocker-list recompute. It reads the stored is_blocked
+// column (SELECT id, is_blocked FROM {issues,wisps} WHERE id IN (...)), batched
+// at queryBatchSize, so it reflects inherited/ancestor blockedness (a child of a
+// blocked parent has is_blocked=1 with no direct blocking edge of its own) with
+// no graph walk. ids missing from both tables are absent from the map (callers
+// treat absent as not-blocked). On a cross-table id collision the wisps row wins,
+// matching loadStatusByIDInTx and the search wisp-merge.
+//
+//nolint:gosec // G201: table is a hardcoded "issues" or "wisps".
+func IsBlockedBatchInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
+	blocked := make(map[string]bool, len(ids))
+	if len(ids) == 0 {
+		return blocked, nil
+	}
+
+	seen := make(map[string]string, len(ids))
+	for _, table := range []string{"issues", "wisps"} {
+		for start := 0; start < len(ids); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(ids) {
+				end = len(ids)
+			}
+			placeholders, args := buildSQLInClause(ids[start:end])
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+				"SELECT id, is_blocked FROM %s WHERE id IN (%s)", table, placeholders), args...)
+			if err != nil {
+				if optionalBlockedTable(table) && isTableNotExistError(err) {
+					break
+				}
+				return nil, fmt.Errorf("read is_blocked from %s: %w", table, err)
+			}
+			for rows.Next() {
+				var id string
+				var b int
+				if err := rows.Scan(&id, &b); err != nil {
+					_ = rows.Close()
+					return nil, fmt.Errorf("scan is_blocked from %s: %w", table, err)
+				}
+				// Tables iterate issues→wisps, so a second encounter is the
+				// wisps row, which is canonical on a cross-table dup (be-iabdi).
+				if _, dup := seen[id]; dup && table != "wisps" {
+					continue
+				}
+				seen[id] = table
+				blocked[id] = b != 0
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, fmt.Errorf("is_blocked rows from %s: %w", table, err)
+			}
+		}
+	}
+	return blocked, nil
+}
+
 // scanDependencyRow scans a single dependency row from a *sql.Rows.
 func scanDependencyRow(rows *sql.Rows) (*types.Dependency, error) {
 	var dep types.Dependency

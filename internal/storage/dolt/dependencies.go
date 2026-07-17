@@ -329,6 +329,21 @@ func (s *DoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []stri
 	return blocked, blockers, nil
 }
 
+// IsBlockedBatch returns the denormalized transitive is_blocked flag for each id
+// in one batched read. Delegates to issueops.IsBlockedBatchInTx.
+func (s *DoltStore) IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error) {
+	var result map[string]bool
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.IsBlockedBatchInTx(ctx, tx, ids)
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to batch-check blockers: %w", err)
+	}
+	return result, nil
+}
+
 // GetNewlyUnblockedByClose finds issues that become unblocked when an issue is closed.
 func (s *DoltStore) GetNewlyUnblockedByClose(ctx context.Context, closedIssueID string) ([]*types.Issue, error) {
 	var result []*types.Issue
