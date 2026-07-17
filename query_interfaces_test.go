@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -74,5 +75,41 @@ func TestQueryInterfacesAgainstRealDolt(t *testing.T) {
 	}
 	if len(evs) == 0 {
 		t.Fatalf("EventsSince returned no durable events after creates")
+	}
+}
+
+// TestAsAccessorsResolveThroughHookDecorator proves the decorator contract that
+// lets the As* accessors use a single direct assertion (no UnwrapStore): a
+// HookFiringStore embeds storage.DoltStorage, so the engine-interface narrow
+// surfaces (claim / event feed / dependents) promote through it and resolve
+// without unwrapping. This is the test that would go red if a future decorator
+// stopped forwarding one of them — i.e. the reason the removed fallback was dead
+// rather than load-bearing.
+func TestAsAccessorsResolveThroughHookDecorator(t *testing.T) {
+	skipIfNoDoltServer(t)
+
+	ctx := context.Background()
+	store, err := beads.Open(ctx, filepath.Join(t.TempDir(), "deco-dolt"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	ds, ok := store.(storage.DoltStorage)
+	if !ok {
+		t.Fatalf("live Dolt store is not a storage.DoltStorage")
+	}
+	// nil runner => passthrough decorator; the narrow surfaces are promoted from
+	// the embedded engine interface, not overridden.
+	decorated := storage.NewHookFiringStore(ds, nil)
+
+	if _, ok := beads.AsIssueClaimer(decorated); !ok {
+		t.Errorf("AsIssueClaimer returned ok=false through a HookFiringStore decorator")
+	}
+	if _, ok := beads.AsEventQuerier(decorated); !ok {
+		t.Errorf("AsEventQuerier returned ok=false through a HookFiringStore decorator")
+	}
+	if _, ok := beads.AsDependentQuerier(decorated); !ok {
+		t.Errorf("AsDependentQuerier returned ok=false through a HookFiringStore decorator")
 	}
 }

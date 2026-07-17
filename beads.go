@@ -65,34 +65,22 @@ type DependentQuerier interface {
 	CountDependentRecords(ctx context.Context, targetID string, depType string) (int, error)
 }
 
-// AsEventQuerier returns the EventQuerier view of s, unwrapping a HookFiringStore
-// decorator so a decorated store keeps the capability. Assert once and fail
-// loud. Mirrors AsIssueClaimer.
+// AsEventQuerier returns the EventQuerier view of s, or (nil, false) when the
+// backing store does not expose the durable-event feed. Assert once and fail
+// loud. A single direct assertion is sufficient — see the decorator contract on
+// AsIssueClaimer.
 func AsEventQuerier(s Storage) (EventQuerier, bool) {
-	if q, ok := s.(EventQuerier); ok {
-		return q, true
-	}
-	if ds, ok := s.(storage.DoltStorage); ok {
-		if q, ok := storage.UnwrapStore(ds).(EventQuerier); ok {
-			return q, true
-		}
-	}
-	return nil, false
+	q, ok := s.(EventQuerier)
+	return q, ok
 }
 
-// AsDependentQuerier returns the DependentQuerier view of s, unwrapping a
-// HookFiringStore decorator so a decorated store keeps the capability. Assert
-// once and fail loud. Mirrors AsIssueClaimer.
+// AsDependentQuerier returns the DependentQuerier view of s, or (nil, false) when
+// the backing store does not expose the target-keyed dependents reads. Assert
+// once and fail loud. A single direct assertion is sufficient — see the
+// decorator contract on AsIssueClaimer.
 func AsDependentQuerier(s Storage) (DependentQuerier, bool) {
-	if q, ok := s.(DependentQuerier); ok {
-		return q, true
-	}
-	if ds, ok := s.(storage.DoltStorage); ok {
-		if q, ok := storage.UnwrapStore(ds).(DependentQuerier); ok {
-			return q, true
-		}
-	}
-	return nil, false
+	q, ok := s.(DependentQuerier)
+	return q, ok
 }
 
 // Claim error sentinels, re-exported (aliased, so errors.Is works across the
@@ -123,18 +111,23 @@ type IssueClaimer interface {
 
 // AsIssueClaimer returns the IssueClaimer view of s when the backing store
 // supports atomic claim (Dolt-backed stores do), and (nil, false) otherwise.
-// Assert once at startup and fail loud. It unwraps a HookFiringStore decorator
-// so a decorated store keeps the claim surface.
+// Assert once at startup and fail loud.
+//
+// DECORATOR CONTRACT: a single direct type-assertion is sufficient — no unwrap.
+// ClaimIssue/ClaimReadyIssue (like EventsSince and the dependents reads) live on
+// the engine interface storage.DoltStorage, and the compile-time drift guards
+// below prove storage.DoltStorage satisfies each narrow surface. A store
+// decorator therefore MUST embed storage.DoltStorage — as HookFiringStore does —
+// which promotes these methods so the assertion reaches them THROUGH the
+// decorator. (This is unlike the cmd/bd optional interfaces — StoreLocator,
+// BackupStore, Flattener, … — which are NOT part of DoltStorage, do not promote,
+// and so genuinely need storage.UnwrapStore.) A former storage.UnwrapStore
+// fallback here was provably dead: whenever s satisfies storage.DoltStorage it
+// already satisfies the narrow surface (drift guard), so the direct assertion
+// always wins; and the only decorator, HookFiringStore, forwards by promotion.
 func AsIssueClaimer(s Storage) (IssueClaimer, bool) {
-	if c, ok := s.(IssueClaimer); ok {
-		return c, true
-	}
-	if ds, ok := s.(storage.DoltStorage); ok {
-		if c, ok := storage.UnwrapStore(ds).(IssueClaimer); ok {
-			return c, true
-		}
-	}
-	return nil, false
+	c, ok := s.(IssueClaimer)
+	return c, ok
 }
 
 // Compile-time drift guards: the full engine interface storage.DoltStorage must
