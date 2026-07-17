@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -49,6 +50,18 @@ func (s *DoltStore) GetAllEventsSince(ctx context.Context, since time.Time) ([]*
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.GetAllEventsSinceInTx(ctx, tx, since)
+		return err
+	})
+	return result, err
+}
+
+// EventsSince returns durable events strictly after the keyset cursor, ordered
+// by (created_at ASC, id ASC) and bounded by limit. Durable events table only.
+func (s *DoltStore) EventsSince(ctx context.Context, cursor storage.EventCursor, limit int) ([]*types.Event, error) {
+	var result []*types.Event
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.EventsSinceInTx(ctx, tx, cursor.CreatedAt, cursor.ID, limit)
 		return err
 	})
 	return result, err

@@ -112,7 +112,7 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 	}
 	newData, _ := json.Marshal(newUpdates)
 
-	if err := RecordFullEventInTable(ctx, tx, eventTable, id, "claimed", actor, string(oldData), string(newData)); err != nil {
+	if err := RecordFullEventInTable(ctx, tx, eventTable, id, types.EventClaimed, actor, string(oldData), string(newData)); err != nil {
 		return nil, fmt.Errorf("failed to record claim event: %w", err)
 	}
 

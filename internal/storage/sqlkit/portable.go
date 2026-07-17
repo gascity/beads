@@ -73,6 +73,19 @@ func (s *Store) GetAllEventsSince(ctx context.Context, since time.Time) ([]*type
 	return out, err
 }
 
+// EventsSince returns durable events strictly after the keyset cursor, ordered
+// by (created_at ASC, id ASC) and bounded by limit. Durable events table only.
+// The same thin issueops delegation the embedded-Dolt reference uses.
+func (s *Store) EventsSince(ctx context.Context, cursor storage.EventCursor, limit int) ([]*types.Event, error) {
+	var out []*types.Event
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var e error
+		out, e = issueops.EventsSinceInTx(ctx, tx, cursor.CreatedAt, cursor.ID, limit)
+		return e
+	})
+	return out, err
+}
+
 func (s *Store) IterAllEventsSince(ctx context.Context, since time.Time) (storage.Iter[types.Event], error) {
 	events, err := s.GetAllEventsSince(ctx, since)
 	if err != nil {
@@ -86,6 +99,18 @@ func (s *Store) GetAllDependencyRecords(ctx context.Context) (map[string][]*type
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var e error
 		out, e = issueops.GetAllDependencyRecordsInTx(ctx, tx)
+		return e
+	})
+	return out, err
+}
+
+// GetDependentRecords returns raw dependency rows whose target is targetID,
+// without hydrating the source issues. Delegates to shared query logic.
+func (s *Store) GetDependentRecords(ctx context.Context, targetID string, depType string, limit int, afterID string) ([]*types.Dependency, error) {
+	var out []*types.Dependency
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var e error
+		out, e = issueops.GetDependentRecordsInTx(ctx, tx, targetID, depType, limit, afterID)
 		return e
 	})
 	return out, err

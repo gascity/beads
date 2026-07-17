@@ -131,6 +131,97 @@ func getDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable st
 	return nil
 }
 
+// Target-keyed dependents-read bounds. A raw read has no consumer to apply a
+// page size, so it clamps its own (default when limit <= 0, hard cap otherwise).
+const (
+	defaultDependentRecordsLimit = 100
+	maxDependentRecordsLimit     = 500
+)
+
+// GetDependentRecordsInTx returns raw dependency rows whose TARGET is targetID
+// — the edges pointing AT targetID — from both the permanent and wisp
+// dependency tables. Unlike GetDependents/GetDependentsWithMetadata it does
+// NOT join or hydrate the source issues, so edges from dangling, cross-project,
+// or wisp sources are returned as raw rows rather than dropped. Rows are keyed
+// by their source issue_id (Dependency.IssueID); target resolution COALESCEs
+// the three typed target columns exactly like the source-keyed sibling reads.
+//
+// When depType is non-empty only rows of that dependency type are returned
+// ("" = all types). Results are ordered by source issue_id ASC and bounded by
+// limit (see the clamp constants). afterID is a keyset continuation over that
+// order: "" starts at the beginning, otherwise only rows with issue_id > afterID
+// are returned. The (issue_id, typed-target) unique keys make issue_id unique
+// among rows sharing a fixed target, so paging on it drops no rows.
+func GetDependentRecordsInTx(ctx context.Context, tx DBTX, targetID, depType string, limit int, afterID string) ([]*types.Dependency, error) {
+	if limit <= 0 {
+		limit = defaultDependentRecordsLimit
+	}
+	if limit > maxDependentRecordsLimit {
+		limit = maxDependentRecordsLimit
+	}
+
+	var all []*types.Dependency
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		rows, err := queryDependentRecordsFromTable(ctx, tx, depTable, targetID, depType, limit, afterID)
+		if err != nil {
+			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+				continue
+			}
+			return nil, err
+		}
+		all = append(all, rows...)
+	}
+
+	// Merge the two per-table pages into one deterministic order. issue_id is
+	// unique per fixed target across both tables (durable vs wisp sources have
+	// disjoint ids), so ordering by (issue_id, type) is total; type is only a
+	// tie-break for the pathological same-source/same-target-string edge.
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].IssueID != all[j].IssueID {
+			return all[i].IssueID < all[j].IssueID
+		}
+		return all[i].Type < all[j].Type
+	})
+	if len(all) > limit {
+		all = all[:limit]
+	}
+	return all, nil
+}
+
+//nolint:gosec // G201: depTable is a hardcoded constant; targetID/depType/afterID are bound as parameters.
+func queryDependentRecordsFromTable(ctx context.Context, tx DBTX, depTable, targetID, depType string, limit int, afterID string) ([]*types.Dependency, error) {
+	query := fmt.Sprintf(`
+		SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
+		FROM %s
+		WHERE %s`, DepTargetExpr, depTable, depTargetEquals(""))
+	args := []any{targetID}
+	if depType != "" {
+		query += " AND type = ?"
+		args = append(args, depType)
+	}
+	if afterID != "" {
+		query += " AND issue_id > ?"
+		args = append(args, afterID)
+	}
+	query += fmt.Sprintf(" ORDER BY issue_id ASC LIMIT %d", limit)
+
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("get dependent records from %s: %w", depTable, err)
+	}
+	defer rows.Close()
+
+	var deps []*types.Dependency
+	for rows.Next() {
+		dep, scanErr := scanDependencyRow(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("get dependent records: scan: %w", scanErr)
+		}
+		deps = append(deps, dep)
+	}
+	return deps, rows.Err()
+}
+
 func GetDependencyCountsInTx(ctx context.Context, tx DBTX, issueIDs []string) (map[string]*types.DependencyCounts, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string]*types.DependencyCounts), nil

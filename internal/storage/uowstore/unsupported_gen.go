@@ -574,6 +574,11 @@ func (unsupportedDoltStorage) GetDependencyRecordsForIssues(_ context.Context, _
 	return
 }
 
+func (unsupportedDoltStorage) GetDependentRecords(_ context.Context, _ string, _ string, _ int, _ string) (_ []*types.Dependency, err error) {
+	err = errUnsupported("GetDependentRecords")
+	return
+}
+
 func (unsupportedDoltStorage) GetAllDependencyRecords(_ context.Context) (_ map[string][]*types.Dependency, err error) {
 	err = errUnsupported("GetAllDependencyRecords")
 	return
@@ -616,6 +621,11 @@ func (unsupportedDoltStorage) IterAllDependencyRecords(_ context.Context) (_ sto
 
 func (unsupportedDoltStorage) CountDependentsByStatus(_ context.Context, _ string, _ types.Status) (_ int64, err error) {
 	err = errUnsupported("CountDependentsByStatus")
+	return
+}
+
+func (unsupportedDoltStorage) EventsSince(_ context.Context, _ storage.EventCursor, _ int) (_ []*types.Event, err error) {
+	err = errUnsupported("EventsSince")
 	return
 }
 

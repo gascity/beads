@@ -10,6 +10,14 @@ import (
 type DependencyQueryStore interface {
 	GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error)
 	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
+	// GetDependentRecords returns raw dependency rows whose target is targetID
+	// (the inbound edges), without hydrating the source issues. depType filters
+	// by dependency type ("" = all); results are ordered by source issue_id ASC,
+	// bounded by limit (0 = a store default, capped), and paged with afterID as
+	// a keyset continuation ("" = start). Mirrors the source-keyed
+	// GetDependencyRecords but in the target direction; unblocks target-side
+	// group membership reads that must see dangling children.
+	GetDependentRecords(ctx context.Context, targetID string, depType string, limit int, afterID string) ([]*types.Dependency, error)
 	GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
 	GetDependencyCounts(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error)
 	GetBlockingInfoForIssues(ctx context.Context, issueIDs []string) (blockedByMap map[string][]string, blocksMap map[string][]string, parentMap map[string]string, err error)

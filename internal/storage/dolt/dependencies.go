@@ -214,6 +214,19 @@ func (s *DoltStore) GetDependencyRecords(ctx context.Context, issueID string) ([
 	return scanDependencyRows(rows)
 }
 
+// GetDependentRecords returns raw dependency rows whose target is issueID,
+// without hydrating the source issues. Delegates to
+// issueops.GetDependentRecordsInTx for shared query logic.
+func (s *DoltStore) GetDependentRecords(ctx context.Context, targetID string, depType string, limit int, afterID string) ([]*types.Dependency, error) {
+	var result []*types.Dependency
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDependentRecordsInTx(ctx, tx, targetID, depType, limit, afterID)
+		return err
+	})
+	return result, err
+}
+
 // GetAllDependencyRecords returns all dependency records.
 // Delegates to issueops.GetAllDependencyRecordsInTx for shared query logic.
 func (s *DoltStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
