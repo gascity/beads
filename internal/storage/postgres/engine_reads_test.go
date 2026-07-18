@@ -482,6 +482,72 @@ func TestKeysetPredicateSargablePostgres(t *testing.T) {
 	}
 }
 
+// TestIsBlockedFilterSargablePostgres pins that the §13.7 IssueFilter.IsBlocked
+// predicate (`is_blocked = ?`) uses an Index/Bitmap scan on
+// idx_issues_is_blocked(is_blocked, status) rather than a Seq Scan on Postgres.
+// It builds a volume-populated synthetic table where blocked rows are rare (so the
+// planner prefers the index for is_blocked = 1) and EXPLAINs the production
+// predicate shape.
+func TestIsBlockedFilterSargablePostgres(t *testing.T) {
+	url := os.Getenv("BEADS_PG_TEST_URL")
+	if url == "" {
+		t.Skip("BEADS_PG_TEST_URL not set; skipping Postgres is_blocked sargability EXPLAIN")
+	}
+	schema := fmt.Sprintf("ibsarg_%d", time.Now().UnixNano())
+	raw, err := pgdialect.OpenRaw(url, schema)
+	if err != nil {
+		t.Fatalf("OpenRaw: %v", err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	ctx := context.Background()
+	if _, err := raw.ExecContext(ctx, fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %q`, schema)); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = raw.ExecContext(context.Background(), fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, schema))
+	})
+	setup := []string{
+		`CREATE TABLE issue_probe (id text PRIMARY KEY, is_blocked smallint NOT NULL DEFAULT 0, status text NOT NULL)`,
+		// The production index shape: (is_blocked, status).
+		`CREATE INDEX idx_ip_is_blocked ON issue_probe (is_blocked, status)`,
+		// 5000 rows, only ~50 blocked (1%), so is_blocked = 1 is selective and the
+		// planner prefers the index over a Seq Scan.
+		`INSERT INTO issue_probe (id, is_blocked, status)
+			SELECT 'id-'||g, (CASE WHEN g % 100 = 0 THEN 1 ELSE 0 END), 'open'
+			FROM generate_series(1,5000) g`,
+		`ANALYZE issue_probe`,
+	}
+	for _, s := range setup {
+		if _, err := raw.ExecContext(ctx, s); err != nil {
+			t.Fatalf("setup %q: %v", s, err)
+		}
+	}
+
+	rows, err := raw.QueryContext(ctx, "EXPLAIN SELECT id FROM issue_probe WHERE is_blocked = 1")
+	if err != nil {
+		t.Fatalf("EXPLAIN: %v", err)
+	}
+	defer rows.Close()
+	var sb strings.Builder
+	for rows.Next() {
+		var line sql.NullString
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if line.Valid {
+			sb.WriteString(line.String)
+			sb.WriteString("\n")
+		}
+	}
+	plan := sb.String()
+	if !strings.Contains(plan, "Index") && !strings.Contains(plan, "Bitmap") {
+		t.Fatalf("is_blocked predicate is not sargable (want Index/Bitmap scan on idx_ip_is_blocked), plan:\n%s", plan)
+	}
+	if strings.Contains(plan, "Seq Scan") {
+		t.Fatalf("is_blocked predicate regressed to a Seq Scan:\n%s", plan)
+	}
+}
+
 // literalizeParams replaces each ? placeholder in query, in order, with the
 // corresponding literal — for EXPLAINing a production ?-bound predicate whose
 // planner shape is under test. It panics on an arity mismatch so a drifted

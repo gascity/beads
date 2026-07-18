@@ -205,6 +205,19 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 			whereClauses = append(whereClauses, "(is_template = 0 OR is_template IS NULL)")
 		}
 	}
+	if filter.IsBlocked != nil {
+		// is_blocked is NOT NULL DEFAULT 0 on both issues and wisps, so a plain
+		// equality is exact (no IS NULL arm needed) and index-backed by
+		// idx_issues_is_blocked(is_blocked, status). Bound as an int so the same
+		// clause is portable across every backend (Dolt/MySQL/SQLite native, and
+		// pgdialect rewrites ? → $n).
+		blocked := 0
+		if *filter.IsBlocked {
+			blocked = 1
+		}
+		whereClauses = append(whereClauses, "is_blocked = ?")
+		args = append(args, blocked)
+	}
 
 	if filter.EmptyDescription {
 		whereClauses = append(whereClauses, "(description IS NULL OR description = '')")

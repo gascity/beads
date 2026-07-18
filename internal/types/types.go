@@ -1276,6 +1276,12 @@ type IssueFilter struct {
 	// Pinned filtering
 	Pinned *bool // Filter by pinned flag (nil = any, true = only pinned, false = only non-pinned)
 
+	// Blocked filtering: the denormalized, transitive is_blocked column (direct ∨
+	// inherited parent-child ∨ waits-for gate), maintained by the write paths and
+	// index-backed by idx_issues_is_blocked(is_blocked, status). The projection
+	// column alone is not a filter; this optional predicate makes it one.
+	IsBlocked *bool // nil = any, true = only is_blocked, false = only unblocked
+
 	// Template filtering
 	IsTemplate *bool // Filter by template flag (nil = any, true = only templates, false = exclude templates)
 
