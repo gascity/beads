@@ -54,12 +54,19 @@ type EventQuerier interface {
 // DependentQuerier is the target-keyed dependents surface of a Storage: the raw
 // inbound-edge reads that back group-membership. Like EventQuerier it is a
 // NARROW hand-declared root interface (not an alias of DependencyQueryStore),
-// exposing only the two calls consumers use. Reach it via AsDependentQuerier.
+// exposing only the calls consumers use. Reach it via AsDependentQuerier.
 type DependentQuerier interface {
 	// GetDependentRecords returns raw dependency rows whose target is targetID,
 	// paged by the dependency row id (afterID, "" = start). See the engine doc
 	// for the two-table span and raw-read/policy-at-hydration contract.
 	GetDependentRecords(ctx context.Context, targetID string, depType string, limit int, afterID string) ([]*Dependency, error)
+	// GetDependentRecordsForIssues returns raw dependency rows keyed by TARGET id
+	// — for a SET of target ids in one batched read, each id's inbound edges (its
+	// dependents), across both dependency tables, ALL dep types, de-duped by row
+	// id. The batched, target-keyed mirror of GetDependencyRecordsForIssues; same
+	// two-table span and raw-read/policy-at-hydration contract as
+	// GetDependentRecords, without paging.
+	GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*Dependency, error)
 	// CountDependentRecords returns the true total inbound-edge count of targetID
 	// (depType "" = all) without paging.
 	CountDependentRecords(ctx context.Context, targetID string, depType string) (int, error)

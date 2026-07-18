@@ -91,3 +91,73 @@ func TestGetDependentRecordsEmbedded(t *testing.T) {
 		t.Fatalf("CountDependentRecords(blocks) = %d, want 2 (dr-s1 + dr-w)", n)
 	}
 }
+
+// TestGetDependentRecordsForIssuesEmbedded mirrors the dolt-suite batched
+// target-keyed coverage on the embedded backend: inbound edges keyed by target
+// across a SET of targets in one call, spanning both tables (durable + wisp
+// sources), with the FULL dep-type set (blocks, waits-for, conditional-blocks,
+// parent-child) and real dep_type preserved, and a decoy (source==id) excluded.
+func TestGetDependentRecordsForIssuesEmbedded(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	te := newTestEnv(t, "bt")
+	ctx := t.Context()
+
+	for _, issue := range []*types.Issue{
+		{ID: "bt-x", Title: "x", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "bt-y", Title: "y", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "bt-blk", Title: "blk", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "bt-wait", Title: "wait", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "bt-cond", Title: "cond", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true},
+		{ID: "bt-child", Title: "child", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "bt-yblk", Title: "yblk", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "bt-z", Title: "z", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	} {
+		if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", issue.ID, err)
+		}
+	}
+	for _, dep := range []*types.Dependency{
+		{IssueID: "bt-blk", DependsOnID: "bt-x", Type: types.DepBlocks},
+		{IssueID: "bt-wait", DependsOnID: "bt-x", Type: types.DepWaitsFor},
+		{IssueID: "bt-cond", DependsOnID: "bt-x", Type: types.DepConditionalBlocks}, // wisp source
+		{IssueID: "bt-child", DependsOnID: "bt-x", Type: types.DepParentChild},
+		{IssueID: "bt-yblk", DependsOnID: "bt-y", Type: types.DepBlocks},
+		{IssueID: "bt-x", DependsOnID: "bt-z", Type: types.DepBlocks}, // decoy: bt-x is the SOURCE
+	} {
+		if err := te.store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("AddDependency %s->%s: %v", dep.IssueID, dep.DependsOnID, err)
+		}
+	}
+
+	typesBySrc := func(deps []*types.Dependency, target string) map[string]types.DependencyType {
+		out := map[string]types.DependencyType{}
+		for _, d := range deps {
+			if d.DependsOnID != target {
+				t.Fatalf("row keyed under %s has target %s", target, d.DependsOnID)
+			}
+			if d.ID == "" {
+				t.Fatalf("dependent row missing ID: %+v", d)
+			}
+			out[d.IssueID] = d.Type
+		}
+		return out
+	}
+
+	byTarget, err := te.store.GetDependentRecordsForIssues(ctx, []string{"bt-x", "bt-y"})
+	if err != nil {
+		t.Fatalf("GetDependentRecordsForIssues: %v", err)
+	}
+	x := typesBySrc(byTarget["bt-x"], "bt-x")
+	if len(x) != 4 || x["bt-blk"] != types.DepBlocks || x["bt-wait"] != types.DepWaitsFor ||
+		x["bt-cond"] != types.DepConditionalBlocks || x["bt-child"] != types.DepParentChild {
+		t.Fatalf("X dependents = %v, want the full 4-type set with real dep_type", x)
+	}
+	if _, bad := x["bt-z"]; bad {
+		t.Fatalf("decoy edge X->Z surfaced as an inbound edge of X: %v", x)
+	}
+	y := typesBySrc(byTarget["bt-y"], "bt-y")
+	if len(y) != 1 || y["bt-yblk"] != types.DepBlocks {
+		t.Fatalf("Y dependents = %v, want {bt-yblk: blocks}", y)
+	}
+}

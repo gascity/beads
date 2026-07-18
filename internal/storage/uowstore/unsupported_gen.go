@@ -579,6 +579,11 @@ func (unsupportedDoltStorage) GetDependentRecords(_ context.Context, _ string, _
 	return
 }
 
+func (unsupportedDoltStorage) GetDependentRecordsForIssues(_ context.Context, _ []string) (_ map[string][]*types.Dependency, err error) {
+	err = errUnsupported("GetDependentRecordsForIssues")
+	return
+}
+
 func (unsupportedDoltStorage) CountDependentRecords(_ context.Context, _ string, _ string) (_ int, err error) {
 	err = errUnsupported("CountDependentRecords")
 	return

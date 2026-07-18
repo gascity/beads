@@ -323,6 +323,19 @@ func (s *Store) GetDependencyRecordsForIssues(ctx context.Context, issueIDs []st
 	return result, err
 }
 
+// GetDependentRecordsForIssues returns the raw inbound dependency rows for a SET
+// of target ids in one batched read, keyed by target id. Delegates to shared
+// query logic; the dialect translates the SQL.
+func (s *Store) GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error) {
+	var result map[string][]*types.Dependency
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var e error
+		result, e = issueops.GetDependentRecordsForIssuesInTx(ctx, tx, targetIDs)
+		return e
+	})
+	return result, err
+}
+
 // DetectCycles finds circular dependencies across both the permanent and wisp
 // dependency tables.
 func (s *Store) DetectCycles(ctx context.Context) ([][]*types.Issue, error) {

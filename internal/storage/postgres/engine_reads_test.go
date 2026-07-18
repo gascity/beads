@@ -140,6 +140,32 @@ func TestEngineReadsPostgres(t *testing.T) {
 		t.Fatalf("CountDependentRecords(parent-child) = %d, want 2", n)
 	}
 
+	// GetDependentRecordsForIssues: the batched target-keyed read over a SET of
+	// targets, proving the sqlkit delegation + pg dialect translate the coalesced
+	// target-IN predicate correctly — inbound edges keyed by target, the decoy
+	// (er-target is the SOURCE of er-target->er-other) surfacing under er-other's
+	// key, not er-target's.
+	byTarget, err := st.GetDependentRecordsForIssues(ctx, []string{"er-target", "er-other"})
+	if err != nil {
+		t.Fatalf("GetDependentRecordsForIssues: %v", err)
+	}
+	tgtSrcs := map[string]bool{}
+	for _, d := range byTarget["er-target"] {
+		if d.DependsOnID != "er-target" {
+			t.Fatalf("row keyed under er-target has target %q", d.DependsOnID)
+		}
+		tgtSrcs[d.IssueID] = true
+	}
+	if len(byTarget["er-target"]) != 3 || !tgtSrcs["er-s1"] || !tgtSrcs["er-s2"] || !tgtSrcs["er-s3"] {
+		t.Fatalf("er-target inbound = %v, want {er-s1,er-s2,er-s3}", tgtSrcs)
+	}
+	if tgtSrcs["er-other"] {
+		t.Fatalf("decoy edge surfaced as an inbound edge of er-target")
+	}
+	if got := byTarget["er-other"]; len(got) != 1 || got[0].IssueID != "er-target" {
+		t.Fatalf("er-other inbound = %v, want one row from er-target (the decoy's real direction)", got)
+	}
+
 	// EventsSince: durable feed + per-issue filter.
 	feed, err := st.EventsSince(ctx, storage.EventCursor{}, "", 500)
 	if err != nil {

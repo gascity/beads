@@ -239,6 +239,19 @@ func (s *DoltStore) CountDependentRecords(ctx context.Context, targetID string, 
 	return n, err
 }
 
+// GetDependentRecordsForIssues returns the raw inbound dependency rows for a SET
+// of target ids in one batched read, keyed by target id. Delegates to
+// issueops.GetDependentRecordsForIssuesInTx for shared query logic.
+func (s *DoltStore) GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error) {
+	var result map[string][]*types.Dependency
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDependentRecordsForIssuesInTx(ctx, tx, targetIDs)
+		return err
+	})
+	return result, err
+}
+
 // GetAllDependencyRecords returns all dependency records.
 // Delegates to issueops.GetAllDependencyRecordsInTx for shared query logic.
 func (s *DoltStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {

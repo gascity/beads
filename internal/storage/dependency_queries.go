@@ -20,6 +20,14 @@ type DependencyQueryStore interface {
 	// group membership reads that must see dangling children. RAW: applies no
 	// visibility policy — the caller filters at hydration.
 	GetDependentRecords(ctx context.Context, targetID string, depType string, limit int, afterID string) ([]*types.Dependency, error)
+	// GetDependentRecordsForIssues returns raw dependency rows keyed by TARGET id:
+	// for each id in targetIDs, the rows whose target is that id (its inbound edges
+	// = its dependents), across both the durable and wisp dependency tables, ALL
+	// dep types (the caller filters), de-duped by row id. It is the batched,
+	// target-keyed mirror of GetDependencyRecordsForIssues — the whole-page read
+	// that answers "what does each of these ids block/gate" without a per-id
+	// fan-out. RAW: applies no visibility policy — the caller filters at hydration.
+	GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error)
 	// CountDependentRecords returns the total number of inbound edges of targetID
 	// (same predicate/scope as GetDependentRecords, depType "" = all), across
 	// both dependency tables, without paging. R2's frozen envelope needs the true

@@ -65,6 +65,13 @@ func TestQueryInterfacesAgainstRealDolt(t *testing.T) {
 	} else if n != 1 {
 		t.Fatalf("CountDependentRecords = %d, want 1", n)
 	}
+	byTarget, err := dq.GetDependentRecordsForIssues(ctx, []string{"qi-target"})
+	if err != nil {
+		t.Fatalf("GetDependentRecordsForIssues: %v", err)
+	}
+	if got := byTarget["qi-target"]; len(got) != 1 || got[0].IssueID != "qi-src" || got[0].DependsOnID != "qi-target" {
+		t.Fatalf("GetDependentRecordsForIssues[qi-target] = %v, want one row {src=qi-src, target=qi-target}", got)
+	}
 
 	eq, ok := beads.AsEventQuerier(store)
 	if !ok {

@@ -326,6 +326,105 @@ func TestGetDependentRecordsLimitClamp(t *testing.T) {
 	}
 }
 
+// TestGetDependentRecordsForIssues verifies the BATCHED target-keyed dependents
+// read: it keys inbound edges by target across a SET of targets in ONE call,
+// spans both dependency tables (durable + wisp sources), returns the FULL dep-type
+// set (blocks, waits-for, conditional-blocks, parent-child — no type is dropped,
+// unlike GetBlockingInfoForIssues which restricts to blocks/parent-child), keeps
+// each row's real dep_type, and never surfaces an edge whose target is not the
+// key (a decoy where the id is the SOURCE stays out).
+func TestGetDependentRecordsForIssues(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	mk := func(id string, ephemeral bool) {
+		iss := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: ephemeral}
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	mk("bt-x", false)     // target X
+	mk("bt-y", false)     // target Y
+	mk("bt-blk", false)   // blocks -> X (durable)
+	mk("bt-wait", false)  // waits-for -> X (durable)
+	mk("bt-cond", true)   // conditional-blocks -> X from a WISP source (wisp_dependencies)
+	mk("bt-child", false) // parent-child -> X (durable)
+	mk("bt-yblk", false)  // blocks -> Y (durable)
+	mk("bt-z", false)     // decoy target: X -> Z (X is the SOURCE)
+
+	addDep := func(src, tgt string, typ types.DependencyType) {
+		if err := store.AddDependency(ctx, &types.Dependency{IssueID: src, DependsOnID: tgt, Type: typ}, "tester"); err != nil {
+			t.Fatalf("add dep %s -> %s (%s): %v", src, tgt, typ, err)
+		}
+	}
+	addDep("bt-blk", "bt-x", types.DepBlocks)
+	addDep("bt-wait", "bt-x", types.DepWaitsFor)
+	addDep("bt-cond", "bt-x", types.DepConditionalBlocks) // wisp source -> wisp_dependencies
+	addDep("bt-child", "bt-x", types.DepParentChild)
+	addDep("bt-yblk", "bt-y", types.DepBlocks)
+	addDep("bt-x", "bt-z", types.DepBlocks) // decoy: X is the SOURCE here
+
+	typesBySrc := func(deps []*types.Dependency, target string) map[string]types.DependencyType {
+		out := map[string]types.DependencyType{}
+		for _, d := range deps {
+			if d.DependsOnID != target {
+				t.Fatalf("row keyed under %s has target %s (must equal the key)", target, d.DependsOnID)
+			}
+			if d.ID == "" {
+				t.Fatalf("dependent row has empty ID (the row primary key): %+v", d)
+			}
+			out[d.IssueID] = d.Type
+		}
+		return out
+	}
+
+	byTarget, err := store.GetDependentRecordsForIssues(ctx, []string{"bt-x", "bt-y"})
+	if err != nil {
+		t.Fatalf("GetDependentRecordsForIssues: %v", err)
+	}
+
+	// X: all four inbound edges, keyed by target, spanning both tables, with the
+	// FULL type set and real dep_type preserved (no drop of waits-for/conditional-
+	// blocks, no drop of the wisp-source or the parent-child edge).
+	x := typesBySrc(byTarget["bt-x"], "bt-x")
+	if len(x) != 4 {
+		t.Fatalf("X dependents = %v, want 4 (blocks, waits-for, conditional-blocks[wisp], parent-child)", x)
+	}
+	if x["bt-blk"] != types.DepBlocks || x["bt-wait"] != types.DepWaitsFor ||
+		x["bt-cond"] != types.DepConditionalBlocks || x["bt-child"] != types.DepParentChild {
+		t.Fatalf("X dependents lost a real dep_type or dropped a wisp/blocking edge: %v", x)
+	}
+	if _, bad := x["bt-z"]; bad {
+		t.Fatalf("decoy edge X->Z surfaced as an inbound edge of X: %v", x)
+	}
+
+	// Y: its single inbound blocks edge, keyed separately in the same batch.
+	y := typesBySrc(byTarget["bt-y"], "bt-y")
+	if len(y) != 1 || y["bt-yblk"] != types.DepBlocks {
+		t.Fatalf("Y dependents = %v, want {bt-yblk: blocks}", y)
+	}
+
+	// A batch element with no inbound edges is simply absent from the map (bt-blk
+	// only has an OUTGOING edge), never an error or a phantom key.
+	leaf, err := store.GetDependentRecordsForIssues(ctx, []string{"bt-blk"})
+	if err != nil {
+		t.Fatalf("GetDependentRecordsForIssues(leaf): %v", err)
+	}
+	if got, present := leaf["bt-blk"]; present {
+		t.Fatalf("source-only node bt-blk has inbound edges %v, want absent", got)
+	}
+
+	// Empty input is a valid empty map, not an error.
+	if got, err := store.GetDependentRecordsForIssues(ctx, nil); err != nil {
+		t.Fatalf("GetDependentRecordsForIssues(nil): %v", err)
+	} else if len(got) != 0 {
+		t.Fatalf("GetDependentRecordsForIssues(nil) = %v, want empty", got)
+	}
+}
+
 // pad renders i as a zero-padded 4-digit string for stable id construction.
 func pad(i int) string {
 	s := ""

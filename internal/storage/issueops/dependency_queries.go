@@ -131,6 +131,87 @@ func getDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable st
 	return nil
 }
 
+// GetDependentRecordsForIssuesInTx returns raw dependency rows keyed by TARGET
+// id: for each id in targetIDs, the rows whose target is that id — its INCOMING
+// edges, i.e. its dependents — spanning BOTH the durable and wisp dependency
+// tables and applying NO type filter or visibility policy (the caller filters
+// at hydration). It is the batched, target-keyed mirror of the source-keyed
+// GetDependencyRecordsForIssuesInTx: one query per table per batch of
+// queryBatchSize target ids, so cost is O(1 + N/queryBatchSize) round-trips per
+// table rather than O(N) — the whole-page read that lets a caller render every
+// id's inbound blocking edges (R2 `blocks`) without a per-id fan-out.
+//
+// A target is matched by the coalesced target expression (DepTargetExpr) — the
+// same predicate the batched source-keyed blocks/counts reads use — so an id
+// that appears in any of the three typed target columns resolves; each returned
+// row's DependsOnID is that resolved target, which is the map key. Rows are
+// de-duped by their primary id across the two tables exactly as
+// GetDependentRecordsInTx does: a wisp promoted to durable carries ONE depid in
+// both tables, so the durable table is scanned first and a repeat id from the
+// wisp table is skipped — the edge is returned once, as its authoritative
+// durable row.
+func GetDependentRecordsForIssuesInTx(ctx context.Context, tx DBTX, targetIDs []string) (map[string][]*types.Dependency, error) {
+	result := make(map[string][]*types.Dependency)
+	if len(targetIDs) == 0 {
+		return result, nil
+	}
+	// De-dup by row id across the two tables, preferring the durable copy scanned
+	// first — same cross-table collision handling as GetDependentRecordsInTx.
+	seen := make(map[string]bool)
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		if err := getDependentRecordsIntoFromTable(ctx, tx, depTable, targetIDs, seen, result); err != nil {
+			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+				continue
+			}
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+//nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by caller); placeholders are ? only.
+func getDependentRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable string, targetIDs []string, seen map[string]bool, result map[string][]*types.Dependency) error {
+	for start := 0; start < len(targetIDs); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(targetIDs) {
+			end = len(targetIDs)
+		}
+		batch := targetIDs[start:end]
+		placeholders := make([]string, len(batch))
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT id, issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
+			 FROM %s WHERE %s ORDER BY %s`,
+			DepTargetExpr, depTable, depTargetIn("", strings.Join(placeholders, ",")), DepTargetExpr), args...)
+		if err != nil {
+			return fmt.Errorf("get dependent records from %s: %w", depTable, err)
+		}
+		for rows.Next() {
+			dep, scanErr := scanDependentRow(rows)
+			if scanErr != nil {
+				_ = rows.Close()
+				return fmt.Errorf("get dependent records: scan: %w", scanErr)
+			}
+			// De-dup by row id (depid): the wisp copy of a promoted edge carries
+			// the same id as the durable copy scanned first, so skip the repeat.
+			if seen[dep.ID] {
+				continue
+			}
+			seen[dep.ID] = true
+			result[dep.DependsOnID] = append(result[dep.DependsOnID], dep)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("get dependent records: rows: %w", err)
+		}
+	}
+	return nil
+}
+
 // Target-keyed dependents-read bounds. A raw read has no consumer to apply a
 // page size, so it clamps its own (default when limit <= 0, hard cap otherwise).
 const (
