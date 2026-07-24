@@ -100,10 +100,11 @@ EXAMPLES:
 }
 
 var (
-	importDryRun     bool
-	importDedup      bool
-	importAllowStale bool
-	importInput      string
+	importDryRun       bool
+	importDedup        bool
+	importAllowStale   bool
+	importConflictSkip bool
+	importInput        string
 )
 
 func init() {
@@ -111,12 +112,18 @@ func init() {
 	importCmd.Flags().BoolVar(&importDryRun, "dry-run", false, "Show what would be imported without importing")
 	importCmd.Flags().BoolVar(&importDedup, "dedup", false, "Skip lines whose title matches an existing open issue")
 	importCmd.Flags().BoolVar(&importAllowStale, "allow-stale", false, "Import rows even when older than the local issue (required to restore an older snapshot)")
+	importCmd.Flags().BoolVar(&importConflictSkip, "conflict-skip", false, "Insert only new rows; leave existing IDs untouched and report them (never overwrites)")
 	rootCmd.AddCommand(importCmd)
 }
 
 func runImport(cmd *cobra.Command, args []string) error {
 	if usesProxiedServer() {
 		return HandleErrorRespectJSON("import is not supported in proxied-server mode")
+	}
+	// Validate mutually-exclusive flags up front, before any read or write:
+	// one never overwrites an existing row, the other forces an overwrite.
+	if importConflictSkip && importAllowStale {
+		return HandleErrorRespectJSON("--conflict-skip and --allow-stale are mutually exclusive: one never overwrites an existing row, the other forces an overwrite")
 	}
 	evt := metrics.NewCommandEvent("import")
 	defer func() {
@@ -196,6 +203,7 @@ type importResultJSON struct {
 	UpdatedIssues       []ImportChange `json:"updated_issues,omitempty"`
 	TieKeptLocalIDs     []string       `json:"tie_kept_local_ids,omitempty"`
 	StaleSkippedIDs     []string       `json:"stale_skipped_ids,omitempty"`
+	ConflictSkippedIDs  []string       `json:"conflict_skipped_ids,omitempty"`
 	SkippedDependencies []string       `json:"skipped_dependencies,omitempty"`
 	DryRun              bool           `json:"dry_run,omitempty"`
 }
@@ -306,7 +314,7 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 
 	// Import issues
 	if len(issues) > 0 {
-		opts := ImportOptions{SkipPrefixValidation: true, AllowStale: importAllowStale}
+		opts := ImportOptions{SkipPrefixValidation: true, AllowStale: importAllowStale, ConflictSkip: importConflictSkip, ConflictSkipStrict: importConflictSkip}
 		importResult, err := importIssuesCore(ctx, "", store, issues, opts)
 		if err != nil {
 			return fmt.Errorf("import failed: %w", err)
@@ -319,6 +327,7 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 		result.UpdatedIssues = append(result.UpdatedIssues, importResult.UpdatedIssues...)
 		result.TieKeptLocalIDs = append(result.TieKeptLocalIDs, importResult.TieKeptLocalIDs...)
 		result.StaleSkippedIDs = append(result.StaleSkippedIDs, importResult.StaleSkippedIDs...)
+		result.ConflictSkippedIDs = append(result.ConflictSkippedIDs, importResult.ConflictSkippedIDs...)
 	}
 
 	if result.Created > 0 || result.Memories > 0 {
@@ -376,6 +385,10 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 	if len(result.TieKeptLocalIDs) > 0 {
 		fmt.Fprintf(os.Stderr, "Kept local state for %d issue(s) with the same updated_at but different content (use --allow-stale to overwrite): %s\n",
 			len(result.TieKeptLocalIDs), strings.Join(result.TieKeptLocalIDs, ", "))
+	}
+	if len(result.ConflictSkippedIDs) > 0 {
+		fmt.Fprintf(os.Stderr, "Skipped %d existing issue(s) (--conflict-skip, never overwritten): %s\n",
+			len(result.ConflictSkippedIDs), strings.Join(result.ConflictSkippedIDs, ", "))
 	}
 	for _, skipped := range result.SkippedDependencies {
 		fmt.Fprintf(os.Stderr, "Skipped dependency: %s\n", skipped)

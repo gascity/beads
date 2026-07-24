@@ -730,6 +730,21 @@ func loadEmbeddedIDPrefixes() (dbPrefix, allowedPrefixes string) {
 	return dbPrefix, allowedPrefixes
 }
 
+// loadStoreDBPrefixes returns the store's own config-table issue_prefix and
+// allowed_prefixes verbatim — NOT the YAML-overlaid prefix. `bd create
+// --prefix` validates against these so it matches the baseline the
+// PrefixMintingStore decorator and the proxied (uow) path both use; validating
+// against the YAML overlay instead would bypass the allow-list whenever the
+// requested prefix happens to equal the workspace YAML prefix, and would reject
+// the shared database's own prefix.
+func loadStoreDBPrefixes() (dbPrefix, allowedPrefixes string) {
+	if store != nil {
+		dbPrefix, _ = store.GetConfig(rootCtx, "issue_prefix")
+		allowedPrefixes, _ = store.GetConfig(rootCtx, "allowed_prefixes")
+	}
+	return dbPrefix, allowedPrefixes
+}
+
 func validateGraphApplyLocalCycles(plan *GraphApplyPlan, knownKeys map[string]bool) error {
 	adj := make(map[string][]string)
 	for _, node := range plan.Nodes {

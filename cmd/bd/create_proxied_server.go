@@ -122,6 +122,9 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 				return nil, "", err
 			}
 		}
+		if err := applyMintPrefix(issue, in.prefix, cctx.IssuePrefix, cctx.AllowedPrefixes, in.force); err != nil {
+			return nil, "", err
+		}
 
 		params := domain.CreateIssueParams{
 			Issue:                   issue,
@@ -298,6 +301,11 @@ func runCreateProxiedMarkdown(_ *cobra.Command, ctx context.Context, in createIn
 				Dependencies: b.deps,
 			})
 		}
+		for i := range paramsList {
+			if err := applyMintPrefix(paramsList[i].Issue, "", cctx.IssuePrefix, cctx.AllowedPrefixes, false); err != nil {
+				return nil, "", err
+			}
+		}
 
 		var result domain.CreateIssuesResult
 		var createErr error
@@ -434,6 +442,18 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 		if useWisp {
 			result, applyErr = uw.IssueUseCase().ApplyWispGraph(ctx, domainPlan, in.createdBy)
 		} else {
+			// Stamp the workspace mint prefix on every auto-minted top-level node
+			// (no explicit ID, no parent) so the proxied graph path matches the
+			// embedded one, whose tx.CreateIssues routes through the decorator.
+			for i := range domainPlan.Nodes {
+				node := &domainPlan.Nodes[i]
+				if node.Issue == nil || node.Issue.ID != "" || node.ParentKey != "" || node.ParentID != "" {
+					continue
+				}
+				if err := applyMintPrefix(node.Issue, "", cctx.IssuePrefix, cctx.AllowedPrefixes, false); err != nil {
+					return nil, "", err
+				}
+			}
 			result, applyErr = uw.IssueUseCase().ApplyIssueGraph(ctx, domainPlan, in.createdBy)
 		}
 		if applyErr != nil {

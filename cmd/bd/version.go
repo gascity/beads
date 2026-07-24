@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 var (
@@ -42,8 +43,9 @@ var versionCmd = &cobra.Command{
 
 		if jsonOutput {
 			result := map[string]interface{}{
-				"version": Version,
-				"build":   Build,
+				"version":      Version,
+				"build":        Build,
+				"capabilities": bdCapabilities(),
 			}
 			if commit != "" {
 				result["commit"] = commit
@@ -78,6 +80,26 @@ var versionCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(versionCmd)
+}
+
+// bdCapabilities lists stable, machine-readable capability markers for this bd
+// build. Consumers (e.g. the Gas City topology migrations) probe these instead
+// of comparing version numbers, which is fork-proof: a forked build advertises
+// the capability the moment it ships the behavior, with no version coupling.
+// Markers are append-only strings; never renumber or repurpose one.
+//
+// Each marker is structurally tied to the code that implements it so a partial
+// cherry-pick cannot advertise a capability the binary does not have:
+// workspace-prefix-mint is emitted only when the `bd create --prefix` flag is
+// actually registered, and its string is the constant declared in the storage
+// package that implements the decorator (so this file cannot even compile
+// without that package present).
+func bdCapabilities() []string {
+	var caps []string
+	if createCmd.Flags().Lookup("prefix") != nil {
+		caps = append(caps, storage.CapabilityWorkspacePrefixMint)
+	}
+	return caps
 }
 
 func resolveCommitHash() string {

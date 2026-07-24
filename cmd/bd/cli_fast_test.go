@@ -1048,22 +1048,29 @@ func TestCLI_CreateDryRun(t *testing.T) {
 		}
 	})
 
-	t.Run("DryRunWithRigPrefix", func(t *testing.T) {
+	t.Run("CreateWithMintPrefix", func(t *testing.T) {
 		tmpDir := setupCLITestDB(t)
 
-		// Run create with --dry-run and --prefix (simulates cross-rig creation)
-		// Note: This won't actually route to another rig since we don't have one,
-		// but it should show the target rig in the preview
-		out := runBDInProcess(t, tmpDir, "create", "Cross-rig issue", "-p", "1",
-			"--prefix", "other-rig",
-			"--dry-run")
+		// Register the foreign prefix in the shared DB's allowed_prefixes via
+		// the transactional add-to-set primitive, then mint an issue under it
+		// with --prefix. The minted ID must carry the requested prefix, not the
+		// database prefix — end-to-end coverage of `bd create --prefix` and
+		// `bd config add-to-set` through the real command path.
+		runBDInProcess(t, tmpDir, "config", "add-to-set", "allowed_prefixes", "other-rig")
 
-		// Verify target rig is shown in preview
-		if !strings.Contains(out, "Target rig:") {
-			t.Errorf("Expected 'Target rig:' in output, got: %s", out)
+		out := runBDInProcess(t, tmpDir, "create", "Cross-rig issue", "-p", "1",
+			"--prefix", "other-rig", "--json")
+
+		if !strings.Contains(out, `"other-rig-`) {
+			t.Errorf("expected minted ID under 'other-rig-' prefix, got: %s", out)
 		}
-		if !strings.Contains(out, "other-rig") {
-			t.Errorf("Expected 'other-rig' in output, got: %s", out)
+
+		// A trailing dash on the flag must be normalized: mint 'other-rig-<id>',
+		// never a malformed double-dash 'other-rig--<id>'.
+		out = runBDInProcess(t, tmpDir, "create", "Dashed prefix", "-p", "1",
+			"--prefix", "other-rig-", "--json")
+		if !strings.Contains(out, `"other-rig-`) || strings.Contains(out, `"other-rig--`) {
+			t.Errorf("trailing-dash --prefix must mint 'other-rig-<id>', got: %s", out)
 		}
 	})
 

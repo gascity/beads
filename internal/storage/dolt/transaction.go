@@ -64,9 +64,34 @@ func (t *doltTransaction) CreateIssueImport(ctx context.Context, issue *types.Is
 // making the write atomically visible in Dolt's version history.
 // Wisp routing is handled within individual transaction methods based on ID/Ephemeral flag.
 func (s *DoltStore) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
-	return s.withRetry(ctx, func() error {
-		return s.runDoltTransaction(ctx, commitMsg, fn)
-	})
+	// withRetry replays fn on transient connection errors. Serialization
+	// failures (1213/1205) are NOT connection errors, so they fall through
+	// withRetry — but runDoltTransaction re-runs fn in a fresh transaction and
+	// a serialization failure guarantees a full server-side rollback, so the
+	// whole unit of work is safe to replay (the same argument withRetryTx makes
+	// for its write path). Retrying here is what makes concurrent
+	// read-modify-write transactions — e.g. several cities appending to a
+	// shared allowed_prefixes set via `bd config add-to-set` — lossless
+	// instead of surfacing a bare deadlock (or losing an update) to the caller.
+	const maxSerializationAttempts = 8
+	backoffDelay := 25 * time.Millisecond
+	for attempt := 1; ; attempt++ {
+		err := s.withRetry(ctx, func() error {
+			return s.runDoltTransaction(ctx, commitMsg, fn)
+		})
+		if err == nil || !isSerializationError(err) || attempt >= maxSerializationAttempts {
+			return err
+		}
+		doltMetrics.serializationErrors.Add(ctx, 1)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoffDelay):
+		}
+		if backoffDelay < time.Second {
+			backoffDelay *= 2
+		}
+	}
 }
 
 func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {

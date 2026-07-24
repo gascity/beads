@@ -38,6 +38,17 @@ func runQuickProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	}
 
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*types.Issue, string, error) {
+		// A parented quick create mints a child ID that inherits the parent's
+		// prefix; only a top-level quick create adopts the workspace prefix.
+		if parentID == "" {
+			cctx, err := uw.ConfigUseCase().LoadCreateContext(ctx)
+			if err != nil {
+				return nil, "", fmt.Errorf("load create context: %w", err)
+			}
+			if err := applyMintPrefix(issue, "", cctx.IssuePrefix, cctx.AllowedPrefixes, false); err != nil {
+				return nil, "", err
+			}
+		}
 		params := domain.CreateIssueParams{
 			Issue:                   issue,
 			ParentID:                parentID,

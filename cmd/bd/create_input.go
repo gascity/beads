@@ -21,6 +21,7 @@ type createInput struct {
 	graphFile          string
 	title              string
 	explicitID         string
+	prefix             string
 	parentID           string
 	issueType          string
 	status             string
@@ -179,12 +180,24 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	in.assignee, _ = cmd.Flags().GetString("assignee")
 	in.externalRef, _ = cmd.Flags().GetString("external-ref")
 	in.explicitID, _ = cmd.Flags().GetString("id")
+	in.prefix, _ = cmd.Flags().GetString("prefix")
 	in.parentID, _ = cmd.Flags().GetString("parent")
 	in.waitsFor, _ = cmd.Flags().GetString("waits-for")
 	in.waitsForGate, _ = cmd.Flags().GetString("waits-for-gate")
 
 	if in.explicitID != "" && in.parentID != "" {
 		return in, HandleError("cannot specify both --id and --parent flags")
+	}
+	if in.prefix != "" {
+		if in.explicitID != "" {
+			return in, HandleError("cannot specify both --id and --prefix flags (--id already fixes the full ID)")
+		}
+		if in.parentID != "" {
+			return in, HandleError("cannot specify both --parent and --prefix flags (a child ID inherits the parent's prefix)")
+		}
+		if in.ephemeral || in.noHistory {
+			return in, HandleError("cannot specify both --prefix and --ephemeral/--no-history (a wisp ID always mints under the '<db-prefix>-wisp' prefix)")
+		}
 	}
 
 	in.labels, _ = cmd.Flags().GetStringSlice("labels")
@@ -285,7 +298,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 
 var singleIssueOnlyFlags = []string{
 	"title",
-	"id", "parent", "no-inherit-labels",
+	"id", "prefix", "parent", "no-inherit-labels",
 	"deps", "waits-for", "waits-for-gate",
 	"type", "priority", "assignee", "external-ref", "spec-id",
 	"status",

@@ -59,10 +59,16 @@ type ImportOptions struct {
 	SkipPrefixValidation       bool
 	ProtectLocalExportIDs      map[string]time.Time
 	// ConflictSkip makes the import insert-if-new instead of UPSERT: an
-	// issue whose ID already exists is left untouched. Set only by the
-	// auto-import upgrade-recovery fallback (GH#3955); explicit `bd import`
-	// leaves this false and keeps UPSERT semantics.
+	// issue whose ID already exists is left untouched. Set by the auto-import
+	// upgrade-recovery fallback (GH#3955) and by explicit `bd import
+	// --conflict-skip`; a plain `bd import` leaves this false and keeps UPSERT
+	// semantics.
 	ConflictSkip bool
+	// ConflictSkipStrict additionally skips aux data (labels/comments/deps) for
+	// conflict-skipped rows, so an existing row is left COMPLETELY untouched.
+	// Set only by the user-facing `bd import --conflict-skip`; the auto-import
+	// recovery path leaves it false to keep its historical additive-aux merge.
+	ConflictSkipStrict bool
 	// AllowStale imports rows even when their updated_at is older than the
 	// local issue's, overwriting newer local state. Required for the
 	// restore-an-older-snapshot recovery workflow, which the default stale
@@ -97,6 +103,10 @@ type ImportResult struct {
 	// row for these (second-granularity timestamp ties, bd-hj85c); their
 	// aux data still merges.
 	TieKeptLocalIDs []string
+	// ConflictSkippedIDs lists incoming rows whose ID already existed and were
+	// left untouched because --conflict-skip requested insert-if-new semantics.
+	// These are reported, not counted as Created.
+	ConflictSkippedIDs []string
 }
 
 // ImportChange describes how an import row modified an existing local issue.
@@ -139,11 +149,15 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 	// (local update committed between the pre-filter read and the batch
 	// write). The transaction may retry, so dedup by ID.
 	staleRejectedSet := make(map[string]struct{})
+	// Rows --conflict-skip left untouched because the ID already existed. The
+	// transaction may retry, so dedup by ID.
+	conflictSkippedSet := make(map[string]struct{})
 	actor := getActorWithGit()
 	batchOpts := storage.BatchCreateOptions{
 		OrphanHandling:                 storage.OrphanAllow,
 		SkipPrefixValidation:           opts.SkipPrefixValidation,
 		ConflictSkip:                   opts.ConflictSkip,
+		ConflictSkipSkipsAux:           opts.ConflictSkipStrict, // user-facing --conflict-skip: leave existing rows fully untouched
 		RejectStaleUpserts:             !opts.AllowStale,
 		SkipDependencyValidationErrors: true,
 		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
@@ -156,6 +170,9 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 		},
 		OnStaleRejected: func(issueID string) {
 			staleRejectedSet[issueID] = struct{}{}
+		},
+		OnConflictSkipped: func(issueID string) {
+			conflictSkippedSet[issueID] = struct{}{}
 		},
 	}
 	var err error
@@ -171,9 +188,16 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 	}
 
 	importedIDs := make([]string, 0, len(issues))
+	var conflictSkippedIDs []string
 	for _, issue := range issues {
 		if _, rejected := staleRejectedSet[issue.ID]; rejected {
 			staleSkippedIDs = append(staleSkippedIDs, issue.ID)
+			continue
+		}
+		if _, skipped := conflictSkippedSet[issue.ID]; skipped {
+			// ID already existed and --conflict-skip left it untouched: report
+			// it rather than miscounting it as created.
+			conflictSkippedIDs = append(conflictSkippedIDs, issue.ID)
 			continue
 		}
 		importedIDs = append(importedIDs, issue.ID)
@@ -186,18 +210,24 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 		if _, rejected := staleRejectedSet[change.ID]; rejected {
 			continue
 		}
+		// --conflict-skip never overwrites an existing row, so a planned update
+		// the insert-if-new path skipped is not an update.
+		if _, skipped := conflictSkippedSet[change.ID]; skipped {
+			continue
+		}
 		updatedIssues = append(updatedIssues, change)
 		updatedCount++
 	}
 	return &ImportResult{
 		Created:             len(importedIDs),
 		Updated:             updatedCount,
-		Skipped:             len(staleSkippedIDs),
+		Skipped:             len(staleSkippedIDs) + len(conflictSkippedIDs),
 		ImportedIDs:         importedIDs,
 		StaleSkippedIDs:     staleSkippedIDs,
 		SkippedDependencies: skippedDependencies,
 		UpdatedIssues:       updatedIssues,
 		TieKeptLocalIDs:     changePlan.TieKeptLocal,
+		ConflictSkippedIDs:  conflictSkippedIDs,
 	}, nil
 }
 
@@ -403,10 +433,17 @@ func wireDeferredImportDeps(ctx context.Context, store storage.DoltStorage, defe
 	// ConflictSkip the engine leaves the stored row untouched and still wires
 	// the batch's dependencies.
 	depOpts.ConflictSkip = true
+	// The deferred pass conflict-skips the (already-inserted) row but MUST still
+	// wire its dependency edges, so it keeps the additive-aux behavior — never
+	// the strict "leave completely untouched" mode.
+	depOpts.ConflictSkipSkipsAux = false
 	// No row write can be stale-rejected under ConflictSkip; leaving the
 	// callback unset keeps a phase-2 signal from ever misreporting a row
-	// whose phase-1 write committed.
+	// whose phase-1 write committed. Every phase-2 dep row already exists, so
+	// its conflict-skip would otherwise fire OnConflictSkipped and misreport a
+	// genuinely-created row as skipped — clear it for the same reason.
 	depOpts.OnStaleRejected = nil
+	depOpts.OnConflictSkipped = nil
 	depTotal := len(depRows)
 	depChunks := (depTotal + importChunkSize - 1) / importChunkSize
 	for start, chunk := 0, 1; start < depTotal; start, chunk = start+importChunkSize, chunk+1 {

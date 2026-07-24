@@ -60,6 +60,12 @@ type CreateIssueResult struct {
 	// row: nothing was written, and the issue's aux data must not be
 	// persisted by later batch stages either (bd-578h9.8).
 	StaleRejected bool
+	// ConflictSkipped reports that ConflictSkip left an existing row untouched
+	// AND (because ConflictSkipSkipsAux was set) its aux data was skipped too,
+	// so later batch stages must keep this issue's dependencies out of the
+	// batch. Only set under ConflictSkipSkipsAux; the deferred-dep pass leaves
+	// it false so its edges still wire.
+	ConflictSkipped bool
 }
 
 func (r *CreateIssueResult) markChanged(table string) {
@@ -113,6 +119,9 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 	if skip, err := checkCrossTableIDCollision(ctx, tx, issue.ID, issueTable, bc.Opts); err != nil {
 		return result, err
 	} else if skip {
+		if bc.Opts.ConflictSkipSkipsAux {
+			result.ConflictSkipped = true
+		}
 		return result, nil
 	}
 
@@ -122,7 +131,7 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 		return result, nil
 	}
 
-	isNew, staleRejected, err := InsertIssueIfNew(ctx, tx, issueTable, issue, bc.Opts)
+	isNew, staleRejected, conflictSkipped, err := InsertIssueIfNew(ctx, tx, issueTable, issue, bc.Opts)
 	if err != nil {
 		return result, err
 	}
@@ -134,6 +143,14 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 		if bc.Opts.OnStaleRejected != nil {
 			bc.Opts.OnStaleRejected(issue.ID)
 		}
+		return result, nil
+	}
+	if conflictSkipped && bc.Opts.ConflictSkipSkipsAux {
+		// `bd import --conflict-skip` leaves the existing row COMPLETELY
+		// untouched: no row rewrite (already skipped) and no aux merge either.
+		// Early-return before markChanged/PersistLabels/PersistComments and
+		// signal the batch to keep this issue's dependencies out too.
+		result.ConflictSkipped = true
 		return result, nil
 	}
 	result.markChanged(issueTable)
@@ -218,6 +235,9 @@ func CreateIssuesInTxWithResult(ctx context.Context, tx *sql.Tx, issues []*types
 		result.merge(issueResult.ChangedTables)
 		if issueResult.StaleRejected {
 			continue // stale snapshot: keep its deps out of the batch too
+		}
+		if issueResult.ConflictSkipped {
+			continue // --conflict-skip strict: existing row untouched, deps out too
 		}
 		accepted = append(accepted, issue)
 	}
@@ -574,6 +594,9 @@ func checkCrossTableIDCollision(ctx context.Context, tx *sql.Tx, id, issueTable 
 		return false, nil
 	}
 	if opts.ConflictSkip {
+		if opts.OnConflictSkipped != nil {
+			opts.OnConflictSkipped(id)
+		}
 		return true, nil
 	}
 	return false, fmt.Errorf("cannot create %q: ID already exists in the %s table (issues and wisps share one ID space)", id, siblingTable)
@@ -602,31 +625,34 @@ func checkCrossTableIDCollision(ctx context.Context, tx *sql.Tx, id, issueTable 
 // additively (bd-hj85c).
 //
 //nolint:gosec // G201: table is a hardcoded constant
-func InsertIssueIfNew(ctx context.Context, tx *sql.Tx, issueTable string, issue *types.Issue, opts storage.BatchCreateOptions) (isNew bool, staleRejected bool, err error) {
+func InsertIssueIfNew(ctx context.Context, tx *sql.Tx, issueTable string, issue *types.Issue, opts storage.BatchCreateOptions) (isNew bool, staleRejected bool, conflictSkipped bool, err error) {
 	var existingCount int
 	if issue.ID != "" {
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, issueTable), issue.ID).Scan(&existingCount); err != nil {
-			return false, false, fmt.Errorf("failed to check issue existence for %s: %w", issue.ID, err)
+			return false, false, false, fmt.Errorf("failed to check issue existence for %s: %w", issue.ID, err)
 		}
 	}
 	if opts.ConflictSkip && existingCount > 0 {
-		return false, false, nil // issue already exists — skip, never overwrite
+		if opts.OnConflictSkipped != nil {
+			opts.OnConflictSkipped(issue.ID)
+		}
+		return false, false, true, nil // issue already exists — skip, never overwrite
 	}
 	if opts.RejectStaleUpserts && existingCount > 0 {
 		var storedNewer int
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ? AND updated_at > ?`, issueTable), issue.ID, issue.UpdatedAt).Scan(&storedNewer); err != nil {
-			return false, false, fmt.Errorf("failed to check issue staleness for %s: %w", issue.ID, err)
+			return false, false, false, fmt.Errorf("failed to check issue staleness for %s: %w", issue.ID, err)
 		}
 		if storedNewer > 0 {
 			// The conditional ODKU would keep every stored column anyway;
 			// skipping the no-op insert makes the rejection observable.
-			return false, true, nil
+			return false, true, false, nil
 		}
 	}
 	if err := insertIssueIntoTable(ctx, tx, issueTable, issue, opts.RejectStaleUpserts); err != nil {
-		return false, false, fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
+		return false, false, false, fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
 	}
-	return existingCount == 0, false, nil
+	return existingCount == 0, false, false, nil
 }
 
 func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, eventTable string) (CreateIssueResult, error) {

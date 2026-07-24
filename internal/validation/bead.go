@@ -166,3 +166,41 @@ func ValidateIDPrefixAllowed(id, dbPrefix, allowedPrefixes string, force bool) e
 	}
 	return fmt.Errorf("prefix mismatch: database uses '%s-' but ID '%s' doesn't match (use --force to override)", dbPrefix, id)
 }
+
+// ValidatePrefixAllowed checks that a bare mint prefix (from `bd create
+// --prefix`) is one the database will accept for new IDs: it must equal the
+// database prefix or appear in allowed_prefixes, unless force is set. It shares
+// the allow-list semantics of ValidateIDPrefixAllowed but reports against the
+// prefix itself rather than a full ID.
+//
+// It returns the CANONICAL prefix (trimmed of surrounding whitespace and a
+// trailing hyphen) so callers stamp the normalized form — otherwise `--prefix
+// riga-` or `--prefix ' riga '` would validate but mint a malformed
+// `riga--<suffix>` / ` riga-<suffix>` ID, since every mint path composes
+// `<prefix>-<suffix>` verbatim from PrefixOverride.
+func ValidatePrefixAllowed(prefix, dbPrefix, allowedPrefixes string, force bool) (string, error) {
+	dbPrefix = strings.TrimSuffix(dbPrefix, "-")
+	canonical := strings.TrimSuffix(strings.TrimSpace(prefix), "-")
+	if canonical == "" {
+		return "", fmt.Errorf("prefix mismatch: --prefix requires a non-empty value")
+	}
+	if force || dbPrefix == "" {
+		return canonical, nil
+	}
+	if canonical == dbPrefix {
+		return canonical, nil
+	}
+	if allowedPrefixes != "" {
+		for _, allowed := range strings.Split(allowedPrefixes, ",") {
+			allowed = strings.TrimSuffix(strings.TrimSpace(allowed), "-")
+			if allowed != "" && allowed == canonical {
+				return canonical, nil
+			}
+		}
+	}
+	if allowedPrefixes != "" {
+		return "", fmt.Errorf("prefix mismatch: database uses '%s-' (allowed: %s) but --prefix '%s' is not an allowed prefix (use --force to override)",
+			dbPrefix, allowedPrefixes, canonical)
+	}
+	return "", fmt.Errorf("prefix mismatch: database uses '%s-' but --prefix '%s' does not match (use --force to override)", dbPrefix, canonical)
+}

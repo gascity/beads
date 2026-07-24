@@ -61,6 +61,9 @@ var createCmd = &cobra.Command{
 			if len(args) > 0 {
 				return HandleError("cannot specify both title and --file flag")
 			}
+			if cmd.Flags().Changed("prefix") {
+				return HandleError("--prefix is not valid with --file (markdown templates supply per-issue IDs; register the prefix in allowed_prefixes and let auto-mint carry it)")
+			}
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
 			if dryRun {
 				return HandleError("--dry-run is not supported with --file flag")
@@ -71,6 +74,9 @@ var createCmd = &cobra.Command{
 		if graphFile != "" {
 			if len(args) > 0 {
 				return HandleError("cannot specify both title and --graph flag")
+			}
+			if cmd.Flags().Changed("prefix") {
+				return HandleError("--prefix is not valid with --graph (graph plans supply per-node IDs; register the prefix in allowed_prefixes and let auto-mint carry it)")
 			}
 			graphDryRun, _ := cmd.Flags().GetBool("dry-run")
 			graphOpts := graphApplyOptionsFromFlags(cmd)
@@ -173,6 +179,7 @@ var createCmd = &cobra.Command{
 		}
 
 		explicitID, _ := cmd.Flags().GetString("id")
+		prefixFlag, _ := cmd.Flags().GetString("prefix")
 		parentID, _ := cmd.Flags().GetString("parent")
 		externalRef, _ := cmd.Flags().GetString("external-ref")
 		deps, _ := cmd.Flags().GetStringSlice("deps")
@@ -326,6 +333,32 @@ var createCmd = &cobra.Command{
 			repoPath = routing.DetermineTargetRepo(routingConfig, userRole, ".")
 		}
 
+		// Resolve --prefix up front (before the dry-run/routing dispatch) so its
+		// validation runs on every path — including --dry-run — and the
+		// normalized prefix is what actually gets minted. The workspace-prefix
+		// decorator covers the implicit case; this is the explicit override.
+		var mintPrefix string
+		if prefixFlag != "" {
+			if explicitID != "" {
+				return HandleError("cannot specify both --id and --prefix flags (--id already fixes the full ID)")
+			}
+			if parentID != "" {
+				return HandleError("cannot specify both --parent and --prefix flags (a child ID inherits the parent's prefix)")
+			}
+			if wisp || noHistory {
+				return HandleError("cannot specify both --prefix and --ephemeral/--no-history (a wisp ID always mints under the '<db-prefix>-wisp' prefix)")
+			}
+			// Validate against the store's own config-table prefix + allowed_prefixes
+			// (what the decorator reads), NOT the YAML-overlaid prefix, so both the
+			// embedded and proxied plumbings validate against the same baseline.
+			dbPrefix, allowedPrefixes := loadStoreDBPrefixes()
+			canonical, err := validation.ValidatePrefixAllowed(prefixFlag, dbPrefix, allowedPrefixes, forceCreate)
+			if err != nil {
+				return HandleError("%v", err)
+			}
+			mintPrefix = canonical
+		}
+
 		renderDryRun := func() error {
 			previewIssue := buildCreateIssue(createIssueParams{
 				ID:                 explicitID,
@@ -357,6 +390,9 @@ var createCmd = &cobra.Command{
 				Payload:            eventPayload,
 			})
 
+			if mintPrefix != "" && previewIssue.ID == "" {
+				previewIssue.ID = mintPrefix + "-(generated)"
+			}
 			if jsonOutput {
 				return outputJSON(previewIssue)
 			}
@@ -507,6 +543,13 @@ var createCmd = &cobra.Command{
 			DeferUntil:         deferUntil,
 			Metadata:           metadata,
 		})
+
+		// An explicit --prefix mints this issue under the given prefix,
+		// overriding both the database prefix and any workspace-prefix
+		// decorator. mintPrefix is the normalized value validated above.
+		if mintPrefix != "" {
+			issue.PrefixOverride = mintPrefix
+		}
 
 		ctx := createCtx
 
@@ -760,6 +803,7 @@ func init() {
 	createCmd.Flags().StringSlice("label", []string{}, "Alias for --labels")
 	_ = createCmd.Flags().MarkHidden("label") // Only fails if flag missing (caught in tests)
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")
+	createCmd.Flags().String("prefix", "", "Mint the auto-generated ID under this prefix (must be the DB prefix or in allowed_prefixes unless --force)")
 	createCmd.Flags().String("parent", "", "Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')")
 	createCmd.Flags().Bool("no-inherit-labels", false, "Don't inherit labels from parent issue")
 	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')")

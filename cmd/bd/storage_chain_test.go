@@ -31,7 +31,7 @@ func clearTelemetryEnv(t *testing.T) {
 }
 
 func TestWireStorageDecorators_NilStorePassesThrough(t *testing.T) {
-	if got := wireStorageDecorators(nil, hooks.NewRunner("/nonexistent"), false); got != nil {
+	if got := wireStorageDecorators(nil, hooks.NewRunner("/nonexistent"), false, ""); got != nil {
 		t.Errorf("wireStorageDecorators(nil, ...) = %v; want nil", got)
 	}
 }
@@ -39,7 +39,7 @@ func TestWireStorageDecorators_NilStorePassesThrough(t *testing.T) {
 func TestWireStorageDecorators_TelemetryOff_HookOn(t *testing.T) {
 	clearTelemetryEnv(t)
 	raw := &stubChainStore{}
-	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, "")
 
 	hf, ok := got.(*storage.HookFiringStore)
 	if !ok {
@@ -58,7 +58,7 @@ func TestWireStorageDecorators_TelemetryOn_HookOn(t *testing.T) {
 	clearTelemetryEnv(t)
 	t.Setenv("BD_OTEL_STDOUT", "true")
 	raw := &stubChainStore{}
-	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, "")
 
 	hf, ok := got.(*storage.HookFiringStore)
 	if !ok {
@@ -81,7 +81,7 @@ func TestWireStorageDecorators_TelemetryOn_HookDisabled(t *testing.T) {
 	clearTelemetryEnv(t)
 	t.Setenv("BD_OTEL_STDOUT", "true")
 	raw := &stubChainStore{}
-	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), true)
+	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), true, "")
 
 	inst, ok := got.(*telemetry.InstrumentedStorage)
 	if !ok {
@@ -95,7 +95,7 @@ func TestWireStorageDecorators_TelemetryOn_HookDisabled(t *testing.T) {
 func TestWireStorageDecorators_TelemetryOff_HookDisabled(t *testing.T) {
 	clearTelemetryEnv(t)
 	raw := &stubChainStore{}
-	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), true)
+	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), true, "")
 	if got.(*stubChainStore) != raw {
 		t.Errorf("with telemetry off and hooks disabled, expected raw store back; got %T", got)
 	}
@@ -104,8 +104,38 @@ func TestWireStorageDecorators_TelemetryOff_HookDisabled(t *testing.T) {
 func TestWireStorageDecorators_NilHookRunner(t *testing.T) {
 	clearTelemetryEnv(t)
 	raw := &stubChainStore{}
-	got := wireStorageDecorators(raw, nil, false)
+	got := wireStorageDecorators(raw, nil, false, "")
 	if got.(*stubChainStore) != raw {
 		t.Errorf("with telemetry off and nil hookRunner, expected raw store back; got %T", got)
+	}
+}
+
+// A non-empty workspace prefix adds the PrefixMintingStore as the OUTERMOST
+// decorator so it stamps the mint prefix before the hook layer fires, and
+// UnwrapStore still peels the whole chain back to the raw store.
+func TestWireStorageDecorators_WorkspacePrefixWrapsOutermost(t *testing.T) {
+	clearTelemetryEnv(t)
+	raw := &stubChainStore{}
+	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, "riga")
+
+	pm, ok := got.(*storage.PrefixMintingStore)
+	if !ok {
+		t.Fatalf("outer decorator: got %T; want *storage.PrefixMintingStore", got)
+	}
+	if _, ok := pm.Unwrap().(*storage.HookFiringStore); !ok {
+		t.Errorf("PrefixMintingStore should wrap the HookFiringStore; got %T", pm.Unwrap())
+	}
+	if peeled := storage.UnwrapStore(got); peeled.(*stubChainStore) != raw {
+		t.Errorf("UnwrapStore should peel every decorator layer; got %T", peeled)
+	}
+}
+
+// An empty workspace prefix leaves the chain untouched (backward compatibility).
+func TestWireStorageDecorators_EmptyWorkspacePrefixNoWrap(t *testing.T) {
+	clearTelemetryEnv(t)
+	raw := &stubChainStore{}
+	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, "")
+	if _, ok := got.(*storage.PrefixMintingStore); ok {
+		t.Errorf("empty workspace prefix should not add PrefixMintingStore; got %T", got)
 	}
 }

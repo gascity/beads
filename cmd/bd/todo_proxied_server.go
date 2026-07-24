@@ -51,6 +51,16 @@ func runTodoAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 	}
 
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*types.Issue, string, error) {
+		// Stamp the workspace mint prefix, mirroring the embedded path (which
+		// gets it for free via the PrefixMintingStore decorator) and the other
+		// proxied create surfaces.
+		cctx, err := uw.ConfigUseCase().LoadCreateContext(ctx)
+		if err != nil {
+			return nil, "", fmt.Errorf("load create context: %w", err)
+		}
+		if err := applyMintPrefix(issue, "", cctx.IssuePrefix, cctx.AllowedPrefixes, false); err != nil {
+			return nil, "", err
+		}
 		result, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{Issue: issue}, getActorWithGit())
 		if err != nil {
 			return nil, "", err

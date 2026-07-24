@@ -53,4 +53,19 @@ type BatchCreateOptions struct {
 	// them as skipped rather than created. May fire more than once per issue
 	// if the enclosing transaction retries; callers should dedup by ID.
 	OnStaleRejected func(issueID string)
+	// OnConflictSkipped records an issue whose ID already existed and was
+	// therefore left untouched because ConflictSkip is set. Lets callers
+	// report the skipped IDs instead of miscounting them as created. May fire
+	// more than once per issue if the enclosing transaction retries; callers
+	// should dedup by ID.
+	OnConflictSkipped func(issueID string)
+	// ConflictSkipSkipsAux makes ConflictSkip leave an existing row COMPLETELY
+	// untouched: when set, a conflict-skipped row also skips its
+	// labels/comments/dependencies (they are NOT merged additively). This is
+	// the `bd import --conflict-skip` contract ("existing rows never
+	// overwritten"). It is deliberately NOT set by the internal deferred-dep
+	// pass, which relies on conflict-skipping the row while still wiring the
+	// batch's dependency edges, nor by the auto-import upgrade-recovery
+	// fallback, both of which keep the additive-aux behavior.
+	ConflictSkipSkipsAux bool
 }

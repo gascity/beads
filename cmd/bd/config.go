@@ -1057,6 +1057,7 @@ func init() {
 
 	configCmd.AddCommand(configSetCmd)
 	configCmd.AddCommand(configSetManyCmd)
+	configCmd.AddCommand(configAddToSetCmd)
 	configCmd.AddCommand(configGetCmd)
 	configCmd.AddCommand(configListCmd)
 	configCmd.AddCommand(configUnsetCmd)
