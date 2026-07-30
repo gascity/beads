@@ -1,0 +1,307 @@
+package issueops
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
+)
+
+// ExecuteCreate applies a guarded create in tx and reports durable tables changed.
+func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequest) (publicops.CreateResult, ChangedTables, error) {
+	attempt := CloneCreateRequest(request)
+	if err := ValidatePublicCreateRequest(attempt); err != nil {
+		return publicops.CreateResult{}, nil, err
+	}
+	batch, err := NewBatchContext(ctx, tx, storage.BatchCreateOptions{CreateOnly: true, OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: attempt.ForceIDPrefix})
+	if err != nil {
+		return publicops.CreateResult{}, nil, err
+	}
+	attempt, err = PreparePublicCreateRequest(attempt, PublicCreateContext{
+		IssuePrefix: batch.ConfigPrefix, AllowedPrefixes: batch.AllowedPrefixes,
+		CustomStatuses: batch.CustomStatuses, CustomTypes: batch.CustomTypes,
+	})
+	if err != nil {
+		return publicops.CreateResult{}, nil, err
+	}
+	for _, comment := range attempt.Comments {
+		if comment.Author == "" {
+			comment.Author = attempt.Actor
+		}
+	}
+	issue := attempt.Issue
+	issue.Comments = attempt.Comments
+	if attempt.InheritLabelsFromParent && attempt.ParentID != "" {
+		labels, err := GetLabelsInTx(ctx, tx, "", attempt.ParentID)
+		if err != nil {
+			return publicops.CreateResult{}, nil, err
+		}
+		issue.Labels = append(issue.Labels, labels...)
+	}
+	childCounterChanged := false
+	if issue.ID == "" && attempt.ParentID != "" {
+		parentIsWisp := IsActiveWispInTx(ctx, tx, attempt.ParentID)
+		issue.ID, err = GetNextChildIDTx(ctx, tx, attempt.ParentID)
+		if err != nil {
+			return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
+		}
+		childCounterChanged = !parentIsWisp
+	}
+	if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor); err != nil {
+		return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
+	}
+	issue.Dependencies = CreatePublicCreateDependencies(issue.ID, attempt)
+	created, err := CreateIssuesInTxWithResult(ctx, tx, []*types.Issue{issue}, attempt.Actor, storage.BatchCreateOptions{CreateOnly: true, OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: attempt.ForceIDPrefix})
+	if err != nil {
+		return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
+	}
+	tables := ChangedTables{}
+	tables.Merge(CreateIssuesDirtyTables(ctx, []*types.Issue{issue}, created))
+	if childCounterChanged {
+		tables.Add("child_counters")
+	}
+	hydrated, err := HydrateIssueOperationResult(ctx, tx, issue.ID, true)
+	if err != nil {
+		return publicops.CreateResult{}, nil, err
+	}
+	return publicops.CreateResult{Issue: hydrated}, tables, nil
+}
+
+// ExecuteUpdate applies a guarded update in tx and reports durable tables changed.
+func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequest) (publicops.UpdateResult, ChangedTables, error) {
+	attempt := CloneUpdateRequest(request)
+	if attempt.Actor == "" || attempt.IssueID == "" {
+		return publicops.UpdateResult{}, nil, fmt.Errorf("%w: update requires actor and issue ID", storage.ErrValidation)
+	}
+	if err := ValidateUpdateRequest(attempt); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if err := ValidateMetadataPatch(attempt.Patch.Metadata); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	tables := ChangedTables{}
+	before, err := GetIssueInTx(ctx, tx, attempt.IssueID)
+	if err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if attempt.ExpectedVersion != nil {
+		if err := CheckVersionInTx(ctx, tx, attempt.IssueID, *attempt.ExpectedVersion); err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+	}
+	if attempt.ExpectedStatus != nil {
+		status := string(*attempt.ExpectedStatus)
+		attempt.ExpectedStatus = nil
+		if err := CheckExpectedFieldsInTx(ctx, tx, attempt.IssueID, attempt.ExpectedAssignee, &status); err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+	} else if err := CheckExpectedFieldsInTx(ctx, tx, attempt.IssueID, attempt.ExpectedAssignee, nil); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if err := AuthorizeAssigneeTransfer(ctx, tx, before, attempt); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	changedAny := false
+	if attempt.Claim {
+		claimed, err := ClaimIssueInTx(ctx, tx, attempt.IssueID, attempt.Actor)
+		if err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+		if claimed.OldIssue.Status != types.StatusInProgress || claimed.OldIssue.Assignee != attempt.Actor {
+			changedAny = true
+			issueTable, _, eventTable, _ := WispTableRouting(claimed.IsWisp)
+			tables.Add(issueTable, eventTable)
+		}
+	}
+	current := before
+	if attempt.Claim {
+		current, err = GetIssueInTx(ctx, tx, attempt.IssueID)
+		if err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+	}
+	updates := UpdateFields(attempt.Patch)
+	OmitUnchangedUpdateFields(current, updates)
+	if len(updates) > 0 {
+		updated, err := UpdateIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor)
+		if err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+		if updated.Changed {
+			changedAny = true
+			issueTable, _, eventTable, _ := WispTableRouting(updated.IsWisp)
+			tables.Add(issueTable, eventTable)
+			if updated.IssueRowsChanged {
+				tables.Add("issues")
+			}
+		}
+	}
+	labelsChanged, err := ApplyLabelPatch(ctx, tx, current, attempt.Patch.Labels, attempt.Actor)
+	if err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if labelsChanged {
+		changedAny = true
+		_, labelTable, eventTable, _ := WispTableRouting(IsActiveWispInTx(ctx, tx, attempt.IssueID))
+		tables.Add(labelTable, eventTable)
+	}
+	metadata, metadataChanged, err := ApplyMetadataPatch(current.Metadata, attempt.Patch.Metadata)
+	if err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if metadataChanged {
+		updated, err := UpdateIssueInTx(ctx, tx, attempt.IssueID, map[string]interface{}{"metadata": metadata}, attempt.Actor)
+		if err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+		if updated.Changed {
+			changedAny = true
+			issueTable, _, eventTable, _ := WispTableRouting(updated.IsWisp)
+			tables.Add(issueTable, eventTable)
+			if updated.IssueRowsChanged {
+				tables.Add("issues")
+			}
+		}
+	}
+	parentResult, err := ApplyParentPatch(ctx, tx, current, attempt.Patch.ParentID, attempt.Actor)
+	if err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if parentResult.Changed {
+		changedAny = true
+		_, _, _, dependencyTable := WispTableRouting(IsActiveWispInTx(ctx, tx, attempt.IssueID))
+		tables.Add(dependencyTable)
+		if parentResult.IssueRowsChanged {
+			tables.Add("issues")
+		}
+	}
+	if attempt.Patch.Persistence.Set {
+		current, err := GetIssueInTx(ctx, tx, attempt.IssueID)
+		if err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+		moved, err := MoveIssuePersistenceInTx(ctx, tx, current, attempt.Patch.Persistence.Value)
+		if err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+		if moved.Changed {
+			changedAny = true
+			tables.Merge(moved.ChangedTables)
+		}
+	}
+	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
+	if err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	return publicops.UpdateResult{Issue: hydrated, Changed: changedAny}, tables, nil
+}
+
+// ExecuteClose applies a guarded close in tx and reports durable tables changed.
+func ExecuteClose(ctx context.Context, tx *sql.Tx, request publicops.CloseRequest) (publicops.CloseResult, ChangedTables, error) {
+	attempt := CloneCloseRequest(request)
+	if attempt.Actor == "" || attempt.IssueID == "" {
+		return publicops.CloseResult{}, nil, fmt.Errorf("%w: close requires actor and issue ID", storage.ErrValidation)
+	}
+	if err := ValidateMetadataPatch(attempt.Metadata); err != nil {
+		return publicops.CloseResult{}, nil, err
+	}
+	closed, err := CloseIssueCheckedInTx(ctx, tx, attempt.IssueID, attempt.Reason, attempt.Actor, attempt.Session, attempt.Force, attempt.ExpectedVersion)
+	if err != nil {
+		return publicops.CloseResult{}, nil, err
+	}
+	tables := ChangedTables{}
+	changed := !closed.AlreadyClosed
+	if changed {
+		issueTable, _, eventTable, _ := WispTableRouting(closed.IsWisp)
+		tables.Add(issueTable, eventTable)
+	}
+	if closed.IssueRowsChanged {
+		tables.Add("issues")
+	}
+	current, err := GetIssueInTx(ctx, tx, attempt.IssueID)
+	if err != nil {
+		return publicops.CloseResult{}, nil, err
+	}
+	metadata, metadataChanged, err := ApplyMetadataPatch(current.Metadata, attempt.Metadata)
+	if err != nil {
+		return publicops.CloseResult{}, nil, err
+	}
+	if metadataChanged {
+		updated, err := UpdateIssueInTx(ctx, tx, attempt.IssueID, map[string]interface{}{"metadata": metadata}, attempt.Actor)
+		if err != nil {
+			return publicops.CloseResult{}, nil, err
+		}
+		if updated.Changed {
+			changed = true
+			issueTable, _, eventTable, _ := WispTableRouting(updated.IsWisp)
+			tables.Add(issueTable, eventTable)
+			if updated.IssueRowsChanged {
+				tables.Add("issues")
+			}
+		}
+	}
+	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
+	if err != nil {
+		return publicops.CloseResult{}, nil, err
+	}
+	return publicops.CloseResult{Issue: hydrated, Changed: changed, OpenChildren: closed.OpenChildren}, tables, nil
+}
+
+// ExecuteReopen applies a guarded reopen in tx and reports durable tables changed.
+func ExecuteReopen(ctx context.Context, tx *sql.Tx, request publicops.ReopenRequest) (publicops.ReopenResult, ChangedTables, error) {
+	attempt := CloneReopenRequest(request)
+	if attempt.Actor == "" || attempt.IssueID == "" {
+		return publicops.ReopenResult{}, nil, fmt.Errorf("%w: reopen requires actor and issue ID", storage.ErrValidation)
+	}
+	if attempt.ExpectedVersion != nil {
+		if err := CheckVersionInTx(ctx, tx, attempt.IssueID, *attempt.ExpectedVersion); err != nil {
+			return publicops.ReopenResult{}, nil, err
+		}
+	}
+	reopened, err := ReopenIssueInTx(ctx, tx, attempt.IssueID, attempt.Reason, attempt.Actor)
+	if err != nil {
+		return publicops.ReopenResult{}, nil, err
+	}
+	tables := ChangedTables{}
+	if reopened.Changed {
+		issueTable, _, eventTable, _ := WispTableRouting(reopened.IsWisp)
+		tables.Add(issueTable, eventTable)
+	}
+	if reopened.IssueRowsChanged {
+		tables.Add("issues")
+	}
+	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
+	if err != nil {
+		return publicops.ReopenResult{}, nil, err
+	}
+	return publicops.ReopenResult{Issue: hydrated, Changed: reopened.Changed}, tables, nil
+}
+
+// CreatePublicCreateDependencies returns the dependency snapshot described by
+// a public create request after its issue ID is known.
+func CreatePublicCreateDependencies(issueID string, request publicops.CreateRequest) []*types.Dependency {
+	dependencies := make([]*types.Dependency, 0, len(request.Dependencies)+2)
+	if request.ParentID != "" {
+		dependencies = append(dependencies, &types.Dependency{IssueID: issueID, DependsOnID: request.ParentID, Type: types.DepParentChild})
+	}
+	if request.WaitsFor != nil {
+		gate := request.WaitsFor.Gate
+		if gate == "" {
+			gate = types.WaitsForAllChildren
+		}
+		metadata, _ := json.Marshal(types.WaitsForMeta{Gate: gate})
+		dependencies = append(dependencies, &types.Dependency{IssueID: issueID, DependsOnID: request.WaitsFor.SpawnerID, Type: types.DepWaitsFor, Metadata: string(metadata)})
+	}
+	for _, dependency := range request.Dependencies {
+		source, target := issueID, dependency.TargetID
+		if dependency.Reverse {
+			source, target = target, issueID
+		}
+		dependencies = append(dependencies, &types.Dependency{IssueID: source, DependsOnID: target, Type: dependency.Type, Metadata: dependency.Metadata, ThreadID: dependency.ThreadID})
+	}
+	return dependencies
+}
