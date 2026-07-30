@@ -37,7 +37,7 @@ var _ domain.IssueSQLRepository = (*issueSQLRepositoryImpl)(nil)
 const issueSelectColumns = sqlbuild.IssueSelectColumns
 
 var allowedUpdateFields = map[string]struct{}{
-	"status": {}, "priority": {}, "title": {}, "assignee": {},
+	"status": {}, "priority": {}, "title": {}, "assignee": {}, "owner": {},
 	"description": {}, "design": {}, "acceptance_criteria": {}, "notes": {},
 	"issue_type": {}, "estimated_minutes": {}, "external_ref": {}, "spec_id": {},
 	"started_at": {}, "closed_at": {}, "close_reason": {}, "closed_by_session": {},

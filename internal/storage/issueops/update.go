@@ -14,7 +14,7 @@ import (
 // IsAllowedUpdateField checks if a field name is valid for issue updates.
 func IsAllowedUpdateField(key string) bool {
 	allowed := map[string]bool{
-		"status": true, "priority": true, "title": true, "assignee": true,
+		"status": true, "priority": true, "title": true, "assignee": true, "owner": true,
 		"description": true, "design": true, "acceptance_criteria": true, "notes": true,
 		"issue_type": true, "estimated_minutes": true, "external_ref": true, "spec_id": true,
 		"started_at": true,
@@ -115,9 +115,11 @@ func ManageLeaseOnUpdate(oldIssue *types.Issue, updates map[string]interface{}) 
 
 // UpdateResult holds the result of an UpdateIssueInTx call.
 type UpdateResult struct {
-	OldIssue *types.Issue
-	IsWisp   bool
-	Changed  bool
+	OldIssue         *types.Issue
+	IsWisp           bool
+	Changed          bool
+	IssueRowsChanged bool
+	WispRowsChanged  bool
 }
 
 // UpdateIssueInTx performs the full update SQL logic within a transaction.
@@ -174,34 +176,8 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 		return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: false}, nil
 	}
 
-	// Validate issue_type against built-in + custom types (GH#3030).
-	// This mirrors the create path (PrepareIssueForInsert → ValidateWithCustom)
-	// and reads custom types from the same transaction, so it works reliably
-	// even in subprocess contexts where the CLI-level store may be unavailable.
-	if rawType, ok := updates["issue_type"]; ok {
-		if issueType, ok := rawType.(string); ok {
-			customTypes, err := ResolveCustomTypesInTx(ctx, tx)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get custom types for validation: %w", err)
-			}
-			if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
-				return nil, fmt.Errorf("invalid issue type: %s", issueType)
-			}
-		}
-	}
-
-	// Bound the VARCHAR(255) assignment columns before touching SQL, so an
-	// over-length assignee/owner aborts with a typed ErrFieldTooLong instead of
-	// a raw backend "data too long" error. Create validates these via
-	// ValidateWithCustom; the generic update path does not, so guard it here.
-	for _, field := range []string{"assignee", "owner"} {
-		if raw, ok := updates[field]; ok {
-			if val, ok := raw.(string); ok {
-				if err := types.CheckFieldLen(field, val); err != nil {
-					return nil, err
-				}
-			}
-		}
+	if err := ValidateScalarUpdates(ctx, tx, updates); err != nil {
+		return nil, err
 	}
 
 	// Build SET clauses.
@@ -314,13 +290,15 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 			if aerr != nil {
 				return nil, fmt.Errorf("affected by status change for %s: %w", id, aerr)
 			}
-			if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+			recompute, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+			if err != nil {
 				return nil, fmt.Errorf("recompute is_blocked after status change for %s: %w", id, err)
 			}
+			return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: true, IssueRowsChanged: !isWisp || recompute.IssueRowsChanged, WispRowsChanged: isWisp || recompute.WispRowsChanged}, nil
 		}
 	}
 
-	return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: true}, nil
+	return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: true, IssueRowsChanged: !isWisp, WispRowsChanged: isWisp}, nil
 }
 
 func cloneUpdateFields(updates map[string]interface{}) map[string]interface{} {
@@ -461,7 +439,7 @@ func resolveNotesAppendOp(oldIssue *types.Issue, updates, resolved map[string]in
 		return nil
 	}
 	if _, direct := resolved["notes"]; direct {
-		return fmt.Errorf("cannot combine a notes replacement with %s", OpAppendNotes)
+		return fmt.Errorf("%w: cannot combine a notes replacement with %s", storage.ErrValidation, OpAppendNotes)
 	}
 	text, ok := raw.(string)
 	if !ok {
