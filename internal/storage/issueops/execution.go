@@ -161,6 +161,19 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	}
 	updates := UpdateFields(attempt.Patch)
 	OmitUnchangedUpdateFields(current, updates)
+	// A metadata patch rides the same row write as the field edits. Writing it
+	// separately recorded a second event for one atomic mutation, fabricating
+	// an update that never happened for every consumer of the event stream.
+	// ApplyMetadataPatch already resolved the patch against the in-transaction
+	// row, so the concrete value goes in alongside the other columns and its
+	// no-op elision is preserved by the changed flag.
+	metadata, metadataChanged, err := ApplyMetadataPatch(current.Metadata, attempt.Patch.Metadata)
+	if err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if metadataChanged {
+		updates["metadata"] = metadata
+	}
 	if len(updates) > 0 {
 		updated, err := UpdateIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor)
 		if err != nil {
@@ -183,24 +196,6 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		changedAny = true
 		_, labelTable, eventTable, _ := WispTableRouting(IsActiveWispInTx(ctx, tx, attempt.IssueID))
 		tables.Add(labelTable, eventTable)
-	}
-	metadata, metadataChanged, err := ApplyMetadataPatch(current.Metadata, attempt.Patch.Metadata)
-	if err != nil {
-		return publicops.UpdateResult{}, nil, err
-	}
-	if metadataChanged {
-		updated, err := UpdateIssueInTx(ctx, tx, attempt.IssueID, map[string]interface{}{"metadata": metadata}, attempt.Actor)
-		if err != nil {
-			return publicops.UpdateResult{}, nil, err
-		}
-		if updated.Changed {
-			changedAny = true
-			issueTable, _, eventTable, _ := WispTableRouting(updated.IsWisp)
-			tables.Add(issueTable, eventTable)
-			if updated.IssueRowsChanged {
-				tables.Add("issues")
-			}
-		}
 	}
 	parentResult, err := ApplyParentPatch(ctx, tx, current, attempt.Patch.ParentID, attempt.Actor)
 	if err != nil {
