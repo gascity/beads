@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -51,6 +52,9 @@ const (
 // ErrNotFound is returned when a requested entity does not exist in the database.
 var ErrNotFound = errors.New("not found")
 
+// ErrValidation classifies deterministic request-validation failures.
+var ErrValidation = errors.New("validation failed")
+
 // ErrNotInitialized is returned when the database has not been initialized
 // (e.g., issue_prefix config is missing).
 var ErrNotInitialized = errors.New("database not initialized")
@@ -62,6 +66,35 @@ var ErrPrefixMismatch = errors.New("prefix mismatch")
 // closed because it is still blocked (is_blocked=1: an open blocking dependency
 // or an open blocking gate). Bypass with CloseIssueOptions.Force.
 var ErrCloseBlocked = errors.New("cannot close blocked issue")
+
+// ErrCloseOpenChildren is returned when an unforced close finds open
+// parent-child dependents.
+var ErrCloseOpenChildren = errors.New("cannot close issue with open children")
+
+// CloseOpenChildrenError reports the issue and open-child count that refused a
+// guarded close.
+type CloseOpenChildrenError struct {
+	IssueID      string
+	OpenChildren int
+}
+
+func (e *CloseOpenChildrenError) Error() string {
+	return fmt.Sprintf("cannot close %s: %d open child issue(s); close children first or use --force to override", e.IssueID, e.OpenChildren)
+}
+
+// Unwrap makes CloseOpenChildrenError match ErrCloseOpenChildren.
+func (e *CloseOpenChildrenError) Unwrap() error {
+	return ErrCloseOpenChildren
+}
+
+// ErrClosedBoundary is returned when a generic update attempts to move an
+// issue across its configured done/non-done status category boundary. Callers
+// must use the lifecycle operation to cross the done boundary.
+var ErrClosedBoundary = errors.New("cannot move issue across done boundary")
+
+// ErrAlreadyExists is returned when a create operation is given an ID that is
+// already occupied. The issue and wisp tables share one ID space.
+var ErrAlreadyExists = errors.New("issue already exists")
 
 // ErrVersionMismatch is returned by a *Checked op given an ExpectedVersion that
 // no longer matches the row's current version (row_lock) — an optimistic
