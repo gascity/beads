@@ -288,6 +288,34 @@ func (h *HookFiringStore) fireHook(event string, issue *types.Issue) {
 	h.runner.Run(event, issue)
 }
 
+// CompleteIssueOperationCreate fires hooks for a committed guarded create.
+// dependencies is a request-neutral snapshot of the dependency changes whose
+// source issues need update hooks.
+func (h *HookFiringStore) CompleteIssueOperationCreate(ctx context.Context, issue *types.Issue, dependencies []*types.Dependency) {
+	for _, pending := range createHookEvents(issue) {
+		h.fireHook(pending.event, pending.issue)
+	}
+	if h.runner == nil || len(dependencies) == 0 {
+		return
+	}
+	request := &types.Issue{Dependencies: cloneDependenciesForHook(dependencies)}
+	for _, pending := range dependencyHookEvents(ctx, []*types.Issue{request}, h.inner.GetIssue, h.inner.GetDependencyRecords) {
+		h.fireHook(pending.event, pending.issue)
+	}
+}
+
+// CompleteIssueOperationUpdate fires the update hook for a committed guarded
+// operation.
+func (h *HookFiringStore) CompleteIssueOperationUpdate(issue *types.Issue) {
+	h.fireHook(hooks.EventUpdate, issue)
+}
+
+// CompleteIssueOperationClose fires the close hook for a committed guarded
+// close.
+func (h *HookFiringStore) CompleteIssueOperationClose(issue *types.Issue) {
+	h.fireHook(hooks.EventClose, issue)
+}
+
 func (h *HookFiringStore) fireHookByID(ctx context.Context, event, id string) {
 	if h.runner == nil {
 		return
