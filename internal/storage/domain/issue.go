@@ -1465,7 +1465,7 @@ func (u *issueUseCaseImpl) reopen(ctx context.Context, id string, params ReopenI
 	}
 	return ReopenIssueResult{
 		Issue:    issue,
-		Reopened: !row.AlreadyOpen,
+		Reopened: row.Updated,
 	}, nil
 }
 

@@ -568,23 +568,26 @@ func (s *DoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor
 	})
 }
 
-// ReopenIssue reopens a closed issue, setting status to open and clearing
-// closed_at and defer_until. If reason is non-empty, it is recorded as a comment.
-// Wraps UpdateIssue for Dolt-specific concerns (wisp routing, DOLT_COMMIT, etc.).
+// ReopenIssue reopens a done-category issue atomically and stages only the
+// versioned tables that this transaction concretely changed.
 func (s *DoltStore) ReopenIssue(ctx context.Context, id string, reason string, actor string) error {
-	updates := map[string]interface{}{
-		"status":      string(types.StatusOpen),
-		"defer_until": nil,
-	}
-	if err := s.UpdateIssue(ctx, id, updates, actor); err != nil {
-		return err
-	}
-	if reason != "" {
-		if err := s.AddComment(ctx, id, actor, reason); err != nil {
-			return fmt.Errorf("reopen comment: %w", err)
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		res, err := issueops.ReopenIssueInTx(ctx, tx, id, reason, actor)
+		if err != nil {
+			return err
 		}
-	}
-	return nil
+		if !res.Changed {
+			return nil
+		}
+		switch {
+		case !res.IsWisp:
+			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, fmt.Sprintf("bd: reopen %s", id))
+		case res.IssueRowsChanged:
+			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues"}, fmt.Sprintf("bd: reopen %s", id))
+		default:
+			return nil
+		}
+	})
 }
 
 // UpdateIssueType changes the issue_type field of an issue.

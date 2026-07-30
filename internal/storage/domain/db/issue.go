@@ -915,7 +915,7 @@ func (r *issueSQLRepositoryImpl) Reopen(ctx context.Context, id string, params d
 		return domain.ReopenRowResult{}, fmt.Errorf("db: IssueSQLRepository.Reopen %s: %w", id, err)
 	}
 	return domain.ReopenRowResult{
-		Updated:     !res.AlreadyOpen,
+		Updated:     res.Changed,
 		AlreadyOpen: res.AlreadyOpen,
 		IsWisp:      res.IsWisp,
 	}, nil
