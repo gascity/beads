@@ -451,18 +451,32 @@ func (u *issueUseCaseImpl) update(ctx context.Context, id string, updates map[st
 	if err := validateCanonicalIssueUpdates(updates); err != nil {
 		return err
 	}
-	if rawType, ok := updates["issue_type"]; ok {
-		if issueType, ok := rawType.(string); ok {
-			customTypes, err := u.cfgRepo.GetCustomTypes(ctx)
-			if err != nil {
-				return fmt.Errorf("update: read custom types: %w", err)
-			}
-			if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
-				return fmt.Errorf("%w: invalid issue type: %s", storage.ErrValidation, issueType)
-			}
-		}
+	if err := u.validateIssueTypeUpdate(ctx, updates); err != nil {
+		return err
 	}
 	return u.issueRepo.Update(ctx, id, updates, actor, IssueTableOpts{UseWispsTable: useWisp})
+}
+
+// validateIssueTypeUpdate rejects an issue_type the configuration does not
+// define. It reads the configured custom types, so unlike
+// validateCanonicalIssueUpdates it needs the use case and a context.
+func (u *issueUseCaseImpl) validateIssueTypeUpdate(ctx context.Context, updates map[string]any) error {
+	rawType, ok := updates["issue_type"]
+	if !ok {
+		return nil
+	}
+	issueType, ok := rawType.(string)
+	if !ok {
+		return nil
+	}
+	customTypes, err := u.cfgRepo.GetCustomTypes(ctx)
+	if err != nil {
+		return fmt.Errorf("update: read custom types: %w", err)
+	}
+	if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
+		return fmt.Errorf("%w: invalid issue type: %s", storage.ErrValidation, issueType)
+	}
+	return nil
 }
 
 // validateCanonicalIssueUpdates rejects out-of-range values for the canonical
@@ -619,6 +633,9 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 	// invalid field used to leave the issue claimed by an update that never
 	// applied.
 	if err := validateCanonicalIssueUpdates(spec.Fields); err != nil {
+		return nil, err
+	}
+	if err := u.validateIssueTypeUpdate(ctx, spec.Fields); err != nil {
 		return nil, err
 	}
 

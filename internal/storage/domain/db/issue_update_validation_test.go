@@ -160,6 +160,47 @@ func (s *testSuite) TestApplyUpdateValidatesFieldsBeforeClaim() {
 	s.Equal(beforeEvents, afterEvents)
 }
 
+func (s *testSuite) TestApplyUpdateValidatesIssueTypeBeforeClaim() {
+	created, err := s.issueUseCase().CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{
+			ID:        "bd-domain-validate-type-before-claim",
+			Title:     "valid incumbent",
+			IssueType: types.TypeTask,
+			Priority:  2,
+		},
+	}, "tester")
+	s.Require().NoError(err)
+
+	before, err := s.issueUseCase().GetIssue(s.Ctx(), created.Issue.ID)
+	s.Require().NoError(err)
+	var beforeEvents int
+	s.Require().NoError(s.Runner().QueryRowContext(
+		s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ?",
+		created.Issue.ID,
+	).Scan(&beforeEvents))
+
+	_, err = s.issueUseCase().ApplyUpdate(s.Ctx(), created.Issue.ID, domain.UpdateSpec{
+		Claim:  true,
+		Fields: map[string]any{"issue_type": "bogus"},
+	}, "claimant")
+	s.ErrorIs(err, storage.ErrValidation)
+
+	after, getErr := s.issueUseCase().GetIssue(s.Ctx(), created.Issue.ID)
+	s.Require().NoError(getErr)
+	s.Equal(before.IssueType, after.IssueType)
+	s.Equal(before.Status, after.Status)
+	s.Equal(before.Assignee, after.Assignee)
+	s.Equal(before.RowVersion, after.RowVersion)
+	var afterEvents int
+	s.Require().NoError(s.Runner().QueryRowContext(
+		s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ?",
+		created.Issue.ID,
+	).Scan(&afterEvents))
+	s.Equal(beforeEvents, afterEvents)
+}
+
 func (s *testSuite) TestIssueUpdateAcceptsLegacyIssueTypeRepresentations() {
 	checks := []struct {
 		name      string
