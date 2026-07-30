@@ -14,6 +14,7 @@ import (
 
 type InsertIssueOpts struct {
 	UseWispsTable bool
+	CreateOnly    bool
 }
 
 type IssueTableOpts struct {
@@ -36,6 +37,7 @@ type ClaimRowResult struct {
 type IssueSQLRepository interface {
 	Insert(ctx context.Context, issue *types.Issue, actor string, opts InsertIssueOpts) error
 	InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts InsertIssueOpts) error
+	MovePersistence(ctx context.Context, id string, mode types.PersistenceMode) (changed bool, err error)
 	Update(ctx context.Context, id string, updates map[string]any, actor string, opts IssueTableOpts) error
 	Claim(ctx context.Context, id, actor string, opts IssueTableOpts) (ClaimRowResult, error)
 	Get(ctx context.Context, id string, opts IssueTableOpts) (*types.Issue, error)
@@ -154,6 +156,8 @@ type CreateIssueParams struct {
 	WaitsFor                *WaitsForSpec
 	DiscoveredFromParent    string
 	ForcePrefix             bool
+	CreateOnly              bool
+	Comments                []*types.Comment
 }
 
 type DependencySpec struct {
@@ -161,6 +165,7 @@ type DependencySpec struct {
 	TargetID      string
 	SwapDirection bool
 	Metadata      string
+	ThreadID      string
 }
 
 type WaitsForSpec struct {
@@ -232,12 +237,19 @@ type ClaimReadyResult struct {
 }
 
 type UpdateSpec struct {
-	Fields       map[string]any
-	Claim        bool
-	AddLabels    []string
-	RemoveLabels []string
-	SetLabels    *[]string
-	Reparent     *string
+	Fields map[string]any
+	Claim  bool
+	// ForceAssigneeTransfer permits an explicit reassignment away from a
+	// different live in-progress owner. It does not bypass any other guard.
+	ForceAssigneeTransfer bool
+	// ExpectedVersion requires the current row version to match before any
+	// claim or field writes.
+	ExpectedVersion *int64
+	Persistence     *types.PersistenceMode
+	AddLabels       []string
+	RemoveLabels    []string
+	SetLabels       *[]string
+	Reparent        *string
 
 	// ExpectedAssignee and ExpectedStatus are the bd-wsqvw compare-and-set
 	// guards (`bd update --if-assignee/--if-status`): when non-nil, the whole
@@ -436,18 +448,72 @@ func (u *issueUseCaseImpl) update(ctx context.Context, id string, updates map[st
 	if len(updates) == 0 {
 		return nil
 	}
+	if err := validateCanonicalIssueUpdates(updates); err != nil {
+		return err
+	}
 	if rawType, ok := updates["issue_type"]; ok {
-		if issueType, ok := rawType.(string); ok && issueType != "" {
+		if issueType, ok := rawType.(string); ok {
 			customTypes, err := u.cfgRepo.GetCustomTypes(ctx)
 			if err != nil {
 				return fmt.Errorf("update: read custom types: %w", err)
 			}
 			if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
-				return fmt.Errorf("invalid issue type: %s", issueType)
+				return fmt.Errorf("%w: invalid issue type: %s", storage.ErrValidation, issueType)
 			}
 		}
 	}
 	return u.issueRepo.Update(ctx, id, updates, actor, IssueTableOpts{UseWispsTable: useWisp})
+}
+
+// validateCanonicalIssueUpdates rejects out-of-range values for the canonical
+// scalar columns, and rejects values whose Go type the column cannot carry. An
+// unsupported type used to fall through unvalidated and reach the SQL layer,
+// which coerced it silently -- a title of 7 was stored as "7", and an int64
+// priority or estimate skipped its range check entirely.
+func validateCanonicalIssueUpdates(updates map[string]any) error {
+	if value, ok := updates["title"]; ok {
+		title, isString := value.(string)
+		if !isString {
+			return canonicalIssueUpdateTypeError("title", value, "string")
+		}
+		if err := types.ValidateIssueTitle(title); err != nil {
+			return canonicalIssueUpdateValidationError("title", err)
+		}
+	}
+	if value, ok := updates["priority"]; ok {
+		priority, isInt := value.(int)
+		if !isInt {
+			return canonicalIssueUpdateTypeError("priority", value, "int")
+		}
+		if err := types.ValidateIssuePriority(priority); err != nil {
+			return canonicalIssueUpdateValidationError("priority", err)
+		}
+	}
+	if value, ok := updates["estimated_minutes"]; ok {
+		var estimatedMinutes *int
+		switch value := value.(type) {
+		case int:
+			estimatedMinutes = &value
+		case *int:
+			estimatedMinutes = value
+		case nil:
+			// Clearing the estimate; a nil estimate validates.
+		default:
+			return canonicalIssueUpdateTypeError("estimated_minutes", value, "int or *int")
+		}
+		if err := types.ValidateIssueEstimatedMinutes(estimatedMinutes); err != nil {
+			return canonicalIssueUpdateValidationError("estimated_minutes", err)
+		}
+	}
+	return nil
+}
+
+func canonicalIssueUpdateValidationError(field string, err error) error {
+	return fmt.Errorf("%w: update field %q: %w", storage.ErrValidation, field, err)
+}
+
+func canonicalIssueUpdateTypeError(field string, value any, want string) error {
+	return fmt.Errorf("%w: update field %q: expected %s, got %T", storage.ErrValidation, field, want, value)
 }
 
 func (u *issueUseCaseImpl) ClaimIssue(ctx context.Context, id, actor string) (ClaimResult, error) {
@@ -504,13 +570,9 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		return nil, fmt.Errorf("ApplyUpdate %s: %w", id, err)
 	}
 
-	// bd-wsqvw field guards: refuse the whole spec atomically on a stale
-	// assignee/status. The read shares this unit of work's transaction, and
-	// every field update rewrites row_lock, so a writer that commits during
-	// the attempt collides at commit time and the caller's whole-attempt
-	// retry re-checks here on the redo — same CAS invariant as the store-level
-	// UpdateIssueChecked path.
-	if spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil {
+	requestedAssignee, assignsAssignee := spec.Fields["assignee"].(string)
+	needsCurrent := spec.ExpectedVersion != nil || spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil || assignsAssignee
+	if needsCurrent {
 		var current *types.Issue
 		if useWisp {
 			current, err = u.GetWisp(ctx, id)
@@ -523,6 +585,9 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		if current == nil {
 			return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 		}
+		if spec.ExpectedVersion != nil && current.RowVersion != *spec.ExpectedVersion {
+			return nil, fmt.Errorf("%w: expected %d, got %d", storage.ErrVersionMismatch, *spec.ExpectedVersion, current.RowVersion)
+		}
 		if spec.ExpectedAssignee != nil && current.Assignee != *spec.ExpectedAssignee {
 			return nil, fmt.Errorf("%w: %s is held by %q, expected %q",
 				storage.ErrAssigneeMismatch, id, current.Assignee, *spec.ExpectedAssignee)
@@ -531,6 +596,30 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 			return nil, fmt.Errorf("%w: %s has status %q, expected %q",
 				storage.ErrStatusMismatch, id, current.Status, *spec.ExpectedStatus)
 		}
+		if assignsAssignee && current.Status == types.StatusInProgress && current.Assignee != "" && current.Assignee != requestedAssignee && current.Assignee != actor && spec.ExpectedAssignee == nil {
+			claimPools, err := u.cfgRepo.GetConfig(ctx, "claim.pools")
+			if err != nil {
+				return nil, fmt.Errorf("ApplyUpdate: read claim pools: %w", err)
+			}
+			isPool := false
+			for _, pool := range strings.Split(claimPools, ",") {
+				if strings.TrimSpace(pool) == current.Assignee {
+					isPool = true
+					break
+				}
+			}
+			if !isPool && !spec.ForceAssigneeTransfer {
+				return nil, fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, current.Assignee)
+			}
+		}
+	}
+
+	// Validate the requested field values before anything mutates. The claim
+	// below writes assignee and status, so a spec that pairs Claim with an
+	// invalid field used to leave the issue claimed by an update that never
+	// applied.
+	if err := validateCanonicalIssueUpdates(spec.Fields); err != nil {
+		return nil, err
 	}
 
 	if spec.Claim {
@@ -567,27 +656,26 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 				return nil, err
 			}
 		}
-	} else {
-		if len(spec.AddLabels) > 0 {
-			if useWisp {
-				if err := u.labelUC.AddWispLabels(ctx, id, spec.AddLabels, actor); err != nil {
-					return nil, err
-				}
-			} else {
-				if err := u.labelUC.AddLabels(ctx, id, spec.AddLabels, actor); err != nil {
-					return nil, err
-				}
+	}
+	if len(spec.AddLabels) > 0 {
+		if useWisp {
+			if err := u.labelUC.AddWispLabels(ctx, id, spec.AddLabels, actor); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := u.labelUC.AddLabels(ctx, id, spec.AddLabels, actor); err != nil {
+				return nil, err
 			}
 		}
-		if len(spec.RemoveLabels) > 0 {
-			if useWisp {
-				if err := u.labelUC.RemoveWispLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
-					return nil, err
-				}
-			} else {
-				if err := u.labelUC.RemoveLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
-					return nil, err
-				}
+	}
+	if len(spec.RemoveLabels) > 0 {
+		if useWisp {
+			if err := u.labelUC.RemoveWispLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := u.labelUC.RemoveLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -601,6 +689,16 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 			if err := u.depUC.Reparent(ctx, id, *spec.Reparent, actor); err != nil {
 				return nil, err
 			}
+		}
+	}
+
+	if spec.Persistence != nil {
+		if _, err := u.issueRepo.MovePersistence(ctx, id, *spec.Persistence); err != nil {
+			return nil, fmt.Errorf("ApplyUpdate: move persistence for %s: %w", id, err)
+		}
+		useWisp, err = u.isWispID(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("ApplyUpdate: re-locate %s after persistence move: %w", id, err)
 		}
 	}
 
@@ -721,15 +819,48 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		issue.ID = minted
 	}
 
+	if params.CreateOnly && params.ExplicitID != "" && !params.ForcePrefix {
+		configuredPrefix, err := u.cfgRepo.GetConfig(ctx, "issue_prefix")
+		if err != nil {
+			return CreateIssueResult{}, fmt.Errorf("create: read issue prefix: %w", err)
+		}
+		allowedPrefixes, err := u.cfgRepo.GetConfig(ctx, "allowed_prefixes")
+		if err != nil {
+			return CreateIssueResult{}, fmt.Errorf("create: read allowed prefixes: %w", err)
+		}
+		if err := validateExplicitIDPrefix(issue.ID, strings.TrimSuffix(configuredPrefix, "-"), allowedPrefixes); err != nil {
+			return CreateIssueResult{}, fmt.Errorf("create: explicit ID prefix: %w", err)
+		}
+	}
+
 	if params.DiscoveredFromParent != "" {
 		if parent, err := u.GetIssue(ctx, params.DiscoveredFromParent); err == nil && parent.SourceRepo != "" {
 			issue.SourceRepo = parent.SourceRepo
 		}
 	}
 
-	insertOpts := InsertIssueOpts{UseWispsTable: useWisp}
+	insertOpts := InsertIssueOpts{UseWispsTable: useWisp, CreateOnly: params.CreateOnly}
 	if err := u.issueRepo.Insert(ctx, issue, actor, insertOpts); err != nil {
 		return CreateIssueResult{}, fmt.Errorf("create: insert: %w", err)
+	}
+
+	if len(params.Comments) > 0 {
+		issue.Comments = make([]*types.Comment, 0, len(params.Comments))
+		for _, comment := range params.Comments {
+			if comment == nil {
+				return CreateIssueResult{}, fmt.Errorf("create: comment must not be nil")
+			}
+			copy := *comment
+			copy.IssueID = issue.ID
+			if copy.Author == "" {
+				copy.Author = actor
+			}
+			inserted, err := u.commentRepo.InsertRecord(ctx, &copy, CommentOpts{UseWispsTable: useWisp})
+			if err != nil {
+				return CreateIssueResult{}, fmt.Errorf("create: insert comment: %w", err)
+			}
+			issue.Comments = append(issue.Comments, inserted)
+		}
 	}
 
 	result := CreateIssueResult{Issue: issue}
@@ -747,7 +878,11 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 	}
 
 	if params.InheritLabelsFromParent && params.ParentID != "" {
-		parentLabels, err := u.labelRepo.List(ctx, params.ParentID, LabelOpts{UseWispsTable: useWisp})
+		parentIsWisp, err := u.isWispID(ctx, params.ParentID)
+		if err != nil {
+			return result, fmt.Errorf("create: determine parent tier for label inheritance from %s: %w", params.ParentID, err)
+		}
+		parentLabels, err := u.labelRepo.List(ctx, params.ParentID, LabelOpts{UseWispsTable: parentIsWisp})
 		switch {
 		case dberrors.IsTableNotExist(err):
 			// Older schemas may lack the wisp label table; nothing to inherit.
@@ -788,11 +923,16 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 			DependsOnID: spec.TargetID,
 			Type:        spec.Type,
 			Metadata:    spec.Metadata,
+			ThreadID:    spec.ThreadID,
 		}
 		if spec.SwapDirection {
 			dep.IssueID, dep.DependsOnID = dep.DependsOnID, dep.IssueID
 		}
-		if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
+		depSourceIsWisp, err := u.isWispID(ctx, dep.IssueID)
+		if err != nil {
+			return result, fmt.Errorf("create: determine dep source tier for %s: %w", dep.IssueID, err)
+		}
+		if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: depSourceIsWisp}); err != nil {
 			return result, fmt.Errorf("create: add dep %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 		}
 		result.PostCreateWrites = true
@@ -811,6 +951,19 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 	}
 
 	return result, nil
+}
+
+func validateExplicitIDPrefix(id, prefix, allowedPrefixes string) error {
+	if strings.HasPrefix(id, prefix+"-") {
+		return nil
+	}
+	for _, allowed := range strings.Split(allowedPrefixes, ",") {
+		allowed = strings.TrimSpace(allowed)
+		if allowed != "" && strings.HasPrefix(id, allowed+"-") {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: issue ID %s does not match configured prefix %s", storage.ErrPrefixMismatch, id, prefix)
 }
 
 func (u *issueUseCaseImpl) CreateIssues(ctx context.Context, params []CreateIssueParams, actor string) (CreateIssuesResult, error) {

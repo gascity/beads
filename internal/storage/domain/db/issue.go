@@ -66,6 +66,19 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	}
 
 	table := pickIssueTable(opts.UseWispsTable)
+	if opts.CreateOnly {
+		if err := issueops.EnsureIssueIDAvailableInTx(ctx, r.runner, issue.ID); err != nil {
+			return err
+		}
+		if err := issueops.InsertIssueStrictInTx(ctx, r.runner, table, issue); err != nil {
+			return err
+		}
+		return r.events.Record(ctx, domain.Event{
+			IssueID: issue.ID,
+			Type:    types.EventCreated,
+			Actor:   actor,
+		}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable})
+	}
 	if err := insertIssueRow(ctx, r.runner, table, issue); err != nil {
 		return err
 	}
@@ -83,6 +96,18 @@ func (r *issueSQLRepositoryImpl) InsertBatch(ctx context.Context, issues []*type
 		}
 	}
 	return nil
+}
+
+func (r *issueSQLRepositoryImpl) MovePersistence(ctx context.Context, id string, mode types.PersistenceMode) (bool, error) {
+	issue, err := issueops.GetIssueInTx(ctx, r.runner, id)
+	if err != nil {
+		return false, fmt.Errorf("db: MovePersistence %s: get issue: %w", id, err)
+	}
+	result, err := issueops.MoveIssuePersistenceInTx(ctx, r.runner, issue, mode)
+	if err != nil {
+		return false, fmt.Errorf("db: MovePersistence %s: %w", id, err)
+	}
+	return result.Changed, nil
 }
 
 func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates map[string]any, actor string, opts domain.IssueTableOpts) error {
@@ -112,21 +137,15 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	_, statusChanging := updates["status"]
 	mergeOps := issueops.HasMergeOps(updates)
 
-	// When the status changes we need the prior row for the status guard,
-	// started_at transition, and is_blocked recomputation. Read it once so all
-	// three use the same snapshot; the ErrNoRows contract is preserved.
-	// Merge operations (metadata edits, note appends) need the same read: they
-	// are resolved against the row as seen by THIS unit-of-work transaction.
-	var oldIssue *types.Issue
-	if statusChanging || mergeOps {
-		var err error
-		oldIssue, err = r.Get(ctx, id, opts)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
-			}
-			return fmt.Errorf("db: Update %s: read old issue: %w", id, err)
+	// Read the prior row once. Status and merge updates need it for their
+	// transaction-local resolution, and every update uses it to suppress true
+	// no-ops before changing row_lock or recording an event.
+	oldIssue, err := r.Get(ctx, id, opts)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
 		}
+		return fmt.Errorf("db: Update %s: read old issue: %w", id, err)
 	}
 
 	// Resolve read-merge-write operation keys (issueops.OpMergeMetadata,
@@ -161,6 +180,11 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 			doneToDone = allowedDoneToDone
 		}
 	}
+	filteredUpdates, err := issueops.DiscardNoopIssueUpdates(oldIssue, updates)
+	if err != nil {
+		return fmt.Errorf("db: Update %s: compare updates: %w", id, err)
+	}
+	updates = filteredUpdates
 	if len(updates) == 0 {
 		return nil
 	}
@@ -186,6 +210,7 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	if statusChanging {
 		setClauses, args = issueops.ManageStartedAt(oldIssue, updates, setClauses, args)
 	}
+	clearLease := issueops.ManageLeaseOnUpdate(oldIssue, updates)
 
 	// Rewrite row_lock on every generic update, mirroring the classic
 	// issueops.updateIssueInTx invariant (update.go): a concurrent
@@ -211,6 +236,11 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	}
 	if rows == 0 {
 		return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
+	}
+	if clearLease && !opts.UseWispsTable {
+		if err := issueops.DeleteLeaseInTx(ctx, r.runner, id); err != nil {
+			return fmt.Errorf("db: Update %s: clear lease: %w", id, err)
+		}
 	}
 
 	eventType := types.EventUpdated
