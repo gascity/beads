@@ -91,11 +91,10 @@ func (s *testSuite) iucClaimOpenAssignedCopy() {
 
 func (s *testSuite) iucClaimClosed() {
 	s.seedOpenIssue("bd-iuc-cl-closed")
-	r := s.issueRepo()
-	s.Require().NoError(r.Update(s.Ctx(), "bd-iuc-cl-closed",
-		map[string]any{"status": string(types.StatusClosed)}, "seeder", domain.IssueTableOpts{}))
+	_, err := s.issueUseCase().CloseIssue(s.Ctx(), "bd-iuc-cl-closed", domain.CloseIssueParams{}, "seeder")
+	s.Require().NoError(err)
 
-	_, err := s.issueUseCase().ClaimIssue(s.Ctx(), "bd-iuc-cl-closed", "alice")
+	_, err = s.issueUseCase().ClaimIssue(s.Ctx(), "bd-iuc-cl-closed", "alice")
 	s.Require().Error(err)
 	s.True(errors.Is(err, storage.ErrNotClaimable), "expected ErrNotClaimable, got %v", err)
 }

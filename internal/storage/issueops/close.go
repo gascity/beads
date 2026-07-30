@@ -22,6 +22,9 @@ type CloseResult struct {
 	IsWisp        bool
 	AlreadyClosed bool
 	OpenChildren  int
+	// IssueRowsChanged reports whether this close changed a durable issues row,
+	// either directly or while recomputing a dependent's blocked state.
+	IssueRowsChanged bool
 }
 
 // CloseIssueInTx closes an issue within a transaction, setting status to closed
@@ -338,9 +341,10 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 		}
 	}
 
-	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+	recompute, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	if err != nil {
 		return nil, fmt.Errorf("recompute is_blocked after close for %s: %w", id, err)
 	}
 
-	return &CloseResult{IsWisp: isWisp}, nil
+	return &CloseResult{IsWisp: isWisp, IssueRowsChanged: !isWisp || recompute.IssueRowsChanged}, nil
 }

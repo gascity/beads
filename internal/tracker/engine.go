@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -94,7 +95,7 @@ type PushHooks struct {
 // integrations follow, eliminating duplication between Linear, GitLab, etc.
 type Engine struct {
 	Tracker   IssueTracker
-	Store     storage.Storage
+	Store     lifecycleStorage
 	Actor     string
 	PullHooks *PullHooks
 	PushHooks *PushHooks
@@ -111,8 +112,13 @@ type Engine struct {
 	warnings []string
 }
 
+type lifecycleStorage interface {
+	storage.Storage
+	storage.IssueLifecycleStore
+}
+
 // NewEngine creates a new sync engine for the given tracker and storage.
-func NewEngine(tracker IssueTracker, store storage.Storage, actor string) *Engine {
+func NewEngine(tracker IssueTracker, store lifecycleStorage, actor string) *Engine {
 	return &Engine{
 		Tracker: tracker,
 		Store:   store,
@@ -503,13 +509,14 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				updates["metadata"] = raw
 			}
 
-			if err := e.Store.RunInTransaction(ctx, fmt.Sprintf("bd: pull update %s", existing.ID), func(tx storage.Transaction) error {
-				if err := tx.UpdateIssue(ctx, existing.ID, updates, e.Actor); err != nil {
-					return err
-				}
-				return syncIssueLabels(ctx, tx, existing.ID, conv.Issue.Labels, e.Actor)
+			if err := e.Store.RunInIssueLifecycleTransaction(ctx, fmt.Sprintf("bd: pull update %s", existing.ID), func(tx storage.IssueLifecycleTransaction) error {
+				return applyPullIssueUpdate(ctx, tx, existing.ID, updates, conv.Issue.Labels, e.Actor)
 			}); err != nil {
 				e.warn("Failed to update %s: %v", existing.ID, err)
+				stats.Errors++
+				if pulledIDs != nil {
+					pulledIDs[existing.ID] = true
+				}
 				continue
 			}
 			stats.Updated++
@@ -548,6 +555,99 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		attribute.Int("sync.skipped", stats.Skipped),
 	)
 	return stats, nil
+}
+
+// applyPullIssueUpdate keeps a pulled update atomic with its labels. Ordinary
+// updates remain generic; a refused done-boundary transition is replayed via
+// the dedicated lifecycle operation.
+func applyPullIssueUpdate(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, labels []string, actor string) error {
+	if err := applyPullIssueFields(ctx, tx, id, updates, actor); err != nil {
+		return err
+	}
+	return syncIssueLabels(ctx, tx, id, labels, actor)
+}
+
+// applyPullIssueFields applies a pulled issue's fields while preserving the
+// caller's control over related collections such as labels.
+func applyPullIssueFields(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, actor string) error {
+	if err := tx.UpdateIssue(ctx, id, updates, actor); err != nil {
+		if !errors.Is(err, storage.ErrClosedBoundary) {
+			return err
+		}
+		if err := applyPullBoundaryUpdate(ctx, tx, id, updates, actor, err); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyPullBoundaryUpdate(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, actor string, boundaryErr error) error {
+	var boundary *issueops.ClosedBoundaryError
+	if !errors.As(boundaryErr, &boundary) {
+		return fmt.Errorf("%w: missing lifecycle direction", storage.ErrClosedBoundary)
+	}
+	current, err := tx.GetIssue(ctx, id)
+	if err != nil {
+		return err
+	}
+	targetValue, ok := updates["status"]
+	if !ok {
+		return storage.ErrClosedBoundary
+	}
+	target := types.Status(fmt.Sprint(targetValue))
+	if current == nil || boundary.From() != current.Status || boundary.To() != target || boundary.EntersDone() == boundary.LeavesDone() {
+		return fmt.Errorf("%w: invalid lifecycle direction", storage.ErrClosedBoundary)
+	}
+	nonStatus := make(map[string]interface{}, len(updates)-1)
+	for key, value := range updates {
+		if key != "status" {
+			nonStatus[key] = value
+		}
+	}
+	if len(nonStatus) > 0 {
+		if err := tx.UpdateIssue(ctx, current.ID, nonStatus, actor); err != nil {
+			return err
+		}
+	}
+	if boundary.EntersDone() {
+		if err := tx.CloseIssue(ctx, current.ID, "", actor, ""); err != nil {
+			return err
+		}
+	} else {
+		changed, err := tx.ReopenIssueWithResult(ctx, current.ID, "", actor)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return fmt.Errorf("%w: reopen reported no lifecycle change", storage.ErrClosedBoundary)
+		}
+	}
+	if target != types.StatusClosed && target != types.StatusOpen {
+		if err := tx.UpdateIssue(ctx, current.ID, map[string]interface{}{"status": target}, actor); err != nil {
+			return err
+		}
+	}
+	updated, err := tx.GetIssue(ctx, current.ID)
+	if err != nil {
+		return err
+	}
+	if updated == nil || updated.Status != target {
+		return fmt.Errorf("%w: lifecycle update ended at status %q instead of %q", storage.ErrClosedBoundary, statusOf(updated), target)
+	}
+	if boundary.EntersDone() && updated.ClosedAt == nil {
+		return fmt.Errorf("%w: lifecycle update entered done without closed_at", storage.ErrClosedBoundary)
+	}
+	if boundary.LeavesDone() && updated.ClosedAt != nil {
+		return fmt.Errorf("%w: lifecycle update left done with closed_at still set", storage.ErrClosedBoundary)
+	}
+	return nil
+}
+
+func statusOf(issue *types.Issue) types.Status {
+	if issue == nil {
+		return ""
+	}
+	return issue.Status
 }
 
 func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
@@ -1149,7 +1249,9 @@ func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipID
 	}
 }
 
-// reimportIssue fetches the external version and updates the local issue.
+// reimportIssue fetches an external version and reapplies its scalar fields.
+// It deliberately preserves local labels because conflict reimport has no
+// authoritative label collection to synchronize.
 func (e *Engine) reimportIssue(ctx context.Context, c Conflict) {
 	extIssue, err := e.Tracker.FetchIssue(ctx, c.ExternalIdentifier)
 	if err != nil || extIssue == nil {
@@ -1174,7 +1276,9 @@ func (e *Engine) reimportIssue(ctx context.Context, c Conflict) {
 		}
 	}
 
-	if err := e.Store.UpdateIssue(ctx, c.IssueID, updates, e.Actor); err != nil {
+	if err := e.Store.RunInIssueLifecycleTransaction(ctx, fmt.Sprintf("bd: reimport update %s", c.IssueID), func(tx storage.IssueLifecycleTransaction) error {
+		return applyPullIssueFields(ctx, tx, c.IssueID, updates, e.Actor)
+	}); err != nil {
 		e.warn("Failed to update %s during reimport: %v", c.IssueID, err)
 	}
 }

@@ -425,6 +425,7 @@ type FastStatisticsStore interface {
 // EmbeddedDoltStore satisfy this interface.
 type DoltStorage interface {
 	Storage
+	IssueLifecycleStore
 	VersionControl
 	HistoryViewer
 	RemoteStore
@@ -718,6 +719,22 @@ type Transaction interface {
 	// (created_at ASC, id ASC) and bounded by limit; issueID scopes the feed to
 	// one issue's history ("" = all issues). Durable events table only.
 	EventsSince(ctx context.Context, cursor EventCursor, issueID string, limit int) ([]*types.Event, error)
+}
+
+// IssueLifecycleTransaction is the internal transaction lane for lifecycle
+// transitions that must retain the backend's durable publication semantics.
+// It deliberately extends neither Storage nor Transaction: ordinary callers
+// continue to use the stable generic transaction contract.
+type IssueLifecycleTransaction interface {
+	Transaction
+	ReopenIssueWithResult(ctx context.Context, id string, reason string, actor string) (bool, error)
+}
+
+// IssueLifecycleStore runs a lifecycle-aware transaction. It is an internal
+// companion to Storage for code that must close or reopen within one durable
+// operation and observe the result before committing.
+type IssueLifecycleStore interface {
+	RunInIssueLifecycleTransaction(ctx context.Context, commitMsg string, fn func(tx IssueLifecycleTransaction) error) error
 }
 
 // DependencyAddOptions controls dependency insertion for both the store-level

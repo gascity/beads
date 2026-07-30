@@ -259,6 +259,26 @@ func (h *HookFiringStore) RunInTransaction(ctx context.Context, commitMsg string
 	return nil
 }
 
+// RunInIssueLifecycleTransaction tracks lifecycle hooks and fires them only
+// after the underlying lifecycle transaction commits.
+func (h *HookFiringStore) RunInIssueLifecycleTransaction(ctx context.Context, commitMsg string, fn func(tx IssueLifecycleTransaction) error) error {
+	var tracked *hookTrackingLifecycleTransaction
+	err := h.inner.RunInIssueLifecycleTransaction(ctx, commitMsg, func(tx IssueLifecycleTransaction) error {
+		tracked = &hookTrackingLifecycleTransaction{
+			hookTrackingTransaction: &hookTrackingTransaction{Transaction: tx},
+			reopener:                tx,
+		}
+		return fn(tracked)
+	})
+	if err != nil || tracked == nil {
+		return err
+	}
+	for _, p := range tracked.pending {
+		h.fireHook(p.event, p.issue)
+	}
+	return nil
+}
+
 // ── Internal helpers ────────────────────────────────────────────────
 
 func (h *HookFiringStore) fireHook(event string, issue *types.Issue) {
@@ -521,6 +541,22 @@ func (t *hookTrackingTransaction) CloseIssue(ctx context.Context, id string, rea
 		t.pending = append(t.pending, pendingHook{hooks.EventClose, issue})
 	}
 	return nil
+}
+
+type hookTrackingLifecycleTransaction struct {
+	*hookTrackingTransaction
+	reopener IssueLifecycleTransaction
+}
+
+func (t *hookTrackingLifecycleTransaction) ReopenIssueWithResult(ctx context.Context, id string, reason string, actor string) (bool, error) {
+	changed, err := t.reopener.ReopenIssueWithResult(ctx, id, reason, actor)
+	if err != nil || !changed {
+		return changed, err
+	}
+	if issue, getErr := t.Transaction.GetIssue(ctx, id); getErr == nil {
+		t.pending = append(t.pending, pendingHook{hooks.EventUpdate, issue})
+	}
+	return true, nil
 }
 
 func (t *hookTrackingTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {

@@ -92,6 +92,7 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	if len(updates) == 0 {
 		return nil
 	}
+	updates = cloneUpdateFields(updates)
 
 	// Bound the VARCHAR(255) assignment columns before touching SQL, mirroring
 	// issueops.updateIssueInTx: an over-length assignee/owner aborts with a typed
@@ -111,12 +112,9 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	_, statusChanging := updates["status"]
 	mergeOps := issueops.HasMergeOps(updates)
 
-	// When the status changes we need the prior row to reproduce the embedded
-	// lifecycle side effects (issueops.updateIssueInTx): closed_at is set on
-	// close and cleared on reopen, started_at is set on the in_progress
-	// transition, the audit event type is derived from the transition, and
-	// is_blocked is recomputed for neighbors. Read the full old issue once so
-	// all four use the same snapshot; the ErrNoRows contract is preserved.
+	// When the status changes we need the prior row for the status guard,
+	// started_at transition, and is_blocked recomputation. Read it once so all
+	// three use the same snapshot; the ErrNoRows contract is preserved.
 	// Merge operations (metadata edits, note appends) need the same read: they
 	// are resolved against the row as seen by THIS unit-of-work transaction.
 	var oldIssue *types.Issue
@@ -149,6 +147,24 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		updates = resolved
 	}
 
+	doneToDone := false
+	if statusChanging {
+		next, allowedDoneToDone, err := issueops.GuardClosedBoundaryInTx(ctx, r.runner, oldIssue.Status, updates["status"])
+		if err != nil {
+			return fmt.Errorf("db: Update %s: %w", id, err)
+		}
+		if next == oldIssue.Status {
+			delete(updates, "status")
+			statusChanging = false
+		} else {
+			updates["status"] = next
+			doneToDone = allowedDoneToDone
+		}
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+
 	setClauses := make([]string, 0, len(updates)+3)
 	args := make([]any, 0, len(updates)+4)
 	for key, value := range updates {
@@ -165,11 +181,9 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	setClauses = append(setClauses, "updated_at = ?")
 	args = append(args, time.Now().UTC())
 
-	// Lifecycle parity with issueops.updateIssueInTx: auto-manage closed_at and
-	// started_at from the status transition unless the caller set them
-	// explicitly. Both helpers no-op when the status is unchanged.
+	// Auto-manage started_at from the status transition unless the caller set it
+	// explicitly.
 	if statusChanging {
-		setClauses, args = issueops.ManageClosedAt(oldIssue, updates, setClauses, args)
 		setClauses, args = issueops.ManageStartedAt(oldIssue, updates, setClauses, args)
 	}
 
@@ -199,12 +213,9 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
 	}
 
-	// Event-type parity: embedded records EventClosed / EventReopened /
-	// EventStatusChanged for status transitions (issueops.DetermineEventType),
-	// EventUpdated otherwise.
 	eventType := types.EventUpdated
 	if statusChanging {
-		eventType = issueops.DetermineEventType(oldIssue, updates)
+		eventType = types.EventStatusChanged
 	}
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID: id,
@@ -218,7 +229,7 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		newStatus := coerceStatus(updates["status"])
 		oldActive := oldIssue.Status != types.StatusClosed && oldIssue.Status != types.StatusPinned
 		newActive := newStatus != types.StatusClosed && newStatus != types.StatusPinned
-		if oldActive != newActive {
+		if !doneToDone && oldActive != newActive {
 			var (
 				affectedIssues, affectedWisps []string
 				aerr                          error
@@ -237,6 +248,14 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		}
 	}
 	return nil
+}
+
+func cloneUpdateFields(updates map[string]any) map[string]any {
+	cloned := make(map[string]any, len(updates))
+	for key, value := range updates {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func coerceStatus(v any) types.Status {
