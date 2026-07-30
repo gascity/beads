@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -172,6 +174,10 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 			doneToDone = allowedDoneToDone
 		}
 	}
+	updates, err = DiscardNoopIssueUpdates(oldIssue, updates)
+	if err != nil {
+		return nil, err
+	}
 	if len(updates) == 0 {
 		return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: false}, nil
 	}
@@ -318,8 +324,8 @@ const (
 	// OpMergeMetadata merges a JSON object's top-level keys into the issue's
 	// metadata (bd update --metadata). Value: string, []byte, or json.RawMessage.
 	OpMergeMetadata = "_merge_metadata"
-	// OpSetMetadata sets individual key=value metadata entries
-	// (bd update --set-metadata). Value: []string.
+	// OpSetMetadata sets individual metadata entries. CLI callers use []string
+	// key=value values; public issue operations use map[string]json.RawMessage.
 	OpSetMetadata = "_set_metadata"
 	// OpUnsetMetadata removes metadata keys (bd update --unset-metadata).
 	// Value: []string.
@@ -368,6 +374,216 @@ func ResolveMergeOps(oldIssue *types.Issue, updates map[string]interface{}) (map
 	return resolved, nil
 }
 
+// DiscardNoopIssueUpdates removes concrete updates whose value already matches
+// the row read by the caller. This keeps idempotent updates from advancing the
+// row version or recording an event.
+func DiscardNoopIssueUpdates(oldIssue *types.Issue, updates map[string]interface{}) (map[string]interface{}, error) {
+	filtered := make(map[string]interface{}, len(updates))
+	for key, value := range updates {
+		unchanged, err := issueFieldMatches(oldIssue, key, value)
+		if err != nil {
+			return nil, err
+		}
+		if !unchanged {
+			filtered[key] = value
+		}
+	}
+	return filtered, nil
+}
+
+func issueFieldMatches(issue *types.Issue, key string, value interface{}) (bool, error) {
+	switch key {
+	case "title":
+		return matchesString(issue.Title, value), nil
+	case "description":
+		return matchesString(issue.Description, value), nil
+	case "design":
+		return matchesString(issue.Design, value), nil
+	case "acceptance_criteria":
+		return matchesString(issue.AcceptanceCriteria, value), nil
+	case "notes":
+		return matchesString(issue.Notes, value), nil
+	case "spec_id":
+		return matchesString(issue.SpecID, value), nil
+	case "await_id":
+		return matchesString(issue.AwaitID, value), nil
+	case "status":
+		return matchesStatus(issue.Status, value), nil
+	case "priority":
+		return matchesInt(issue.Priority, value), nil
+	case "issue_type":
+		return matchesIssueType(issue.IssueType, value), nil
+	case "assignee":
+		return matchesString(issue.Assignee, value), nil
+	case "owner":
+		return matchesString(issue.Owner, value), nil
+	case "estimated_minutes":
+		return matchesIntPointer(issue.EstimatedMinutes, value), nil
+	case "external_ref":
+		return matchesStringPointer(issue.ExternalRef, value), nil
+	case "started_at":
+		return matchesTimePointer(issue.StartedAt, value), nil
+	case "closed_at":
+		return matchesTimePointer(issue.ClosedAt, value), nil
+	case "due_at":
+		return matchesTimePointer(issue.DueAt, value), nil
+	case "defer_until":
+		return matchesTimePointer(issue.DeferUntil, value), nil
+	case "close_reason":
+		return matchesString(issue.CloseReason, value), nil
+	case "closed_by_session":
+		return matchesString(issue.ClosedBySession, value), nil
+	case "source_repo":
+		return matchesString(issue.SourceRepo, value), nil
+	case "sender":
+		return matchesString(issue.Sender, value), nil
+	case "wisp":
+		return matchesBool(issue.Ephemeral, value), nil
+	case "wisp_type":
+		return matchesWispType(issue.WispType, value), nil
+	case "no_history":
+		return matchesBool(issue.NoHistory, value), nil
+	case "pinned":
+		return matchesBool(issue.Pinned, value), nil
+	case "mol_type":
+		return matchesMolType(issue.MolType, value), nil
+	case "event_category", "event_kind":
+		return matchesString(issue.EventKind, value), nil
+	case "event_actor", "actor":
+		return matchesString(issue.Actor, value), nil
+	case "event_target", "target":
+		return matchesString(issue.Target, value), nil
+	case "event_payload", "payload":
+		return matchesString(issue.Payload, value), nil
+	case "waiters":
+		waiters, ok := value.([]string)
+		return ok && slices.Equal(issue.Waiters, waiters), nil
+	case "metadata":
+		current, err := normalizedMetadata(issue.Metadata)
+		if err != nil {
+			return false, err
+		}
+		candidate, err := storage.NormalizeMetadataValue(value)
+		if err != nil {
+			return false, err
+		}
+		return current == candidate, nil
+	default:
+		return false, nil
+	}
+}
+
+func matchesString(current string, candidate interface{}) bool {
+	switch value := candidate.(type) {
+	case nil:
+		return current == ""
+	case string:
+		return current == value
+	default:
+		return false
+	}
+}
+
+func matchesInt(current int, candidate interface{}) bool {
+	value, ok := candidate.(int)
+	return ok && current == value
+}
+
+func matchesBool(current bool, candidate interface{}) bool {
+	value, ok := candidate.(bool)
+	return ok && current == value
+}
+
+func matchesStatus(current types.Status, candidate interface{}) bool {
+	switch value := candidate.(type) {
+	case string:
+		return current == types.Status(value)
+	case types.Status:
+		return current == value
+	default:
+		return false
+	}
+}
+
+func matchesIssueType(current types.IssueType, candidate interface{}) bool {
+	switch value := candidate.(type) {
+	case string:
+		return current == types.IssueType(value)
+	case types.IssueType:
+		return current == value
+	default:
+		return false
+	}
+}
+
+func matchesWispType(current types.WispType, candidate interface{}) bool {
+	switch value := candidate.(type) {
+	case string:
+		return current == types.WispType(value)
+	case types.WispType:
+		return current == value
+	default:
+		return false
+	}
+}
+
+func matchesMolType(current types.MolType, candidate interface{}) bool {
+	switch value := candidate.(type) {
+	case string:
+		return current == types.MolType(value)
+	case types.MolType:
+		return current == value
+	default:
+		return false
+	}
+}
+
+func matchesIntPointer(current *int, candidate interface{}) bool {
+	switch value := candidate.(type) {
+	case nil:
+		return current == nil
+	case *int:
+		return (current == nil && value == nil) || (current != nil && value != nil && *current == *value)
+	case int:
+		return current != nil && *current == value
+	default:
+		return false
+	}
+}
+
+func matchesStringPointer(current *string, candidate interface{}) bool {
+	switch value := candidate.(type) {
+	case nil:
+		return current == nil
+	case *string:
+		return (current == nil && value == nil) || (current != nil && value != nil && *current == *value)
+	case string:
+		return current != nil && *current == value
+	default:
+		return false
+	}
+}
+
+func matchesTimePointer(current *time.Time, candidate interface{}) bool {
+	switch value := candidate.(type) {
+	case nil:
+		return current == nil
+	case *time.Time:
+		return (current == nil && value == nil) || (current != nil && value != nil && current.Equal(*value))
+	case time.Time:
+		return current != nil && current.Equal(value)
+	default:
+		return false
+	}
+}
+
+func normalizedMetadata(value json.RawMessage) (string, error) {
+	if len(value) == 0 {
+		return "{}", nil
+	}
+	return storage.NormalizeMetadataValue(value)
+}
+
 // isMergeOpKey reports whether k is a read-merge-write operation key consumed by
 // ResolveMergeOps rather than a concrete column value to pass through unchanged.
 func isMergeOpKey(k string) bool {
@@ -407,15 +623,20 @@ func resolveMetadataMergeOps(oldIssue *types.Issue, updates, resolved map[string
 		current = merged
 	}
 	if hasSet || hasUnset {
-		set, err := mergeOpStrings(OpSetMetadata, updates[OpSetMetadata], hasSet)
-		if err != nil {
-			return err
-		}
 		unset, err := mergeOpStrings(OpUnsetMetadata, updates[OpUnsetMetadata], hasUnset)
 		if err != nil {
 			return err
 		}
-		merged, err := storage.ApplyMetadataEdits(current, set, unset)
+		var merged json.RawMessage
+		if set, typed := updates[OpSetMetadata].(map[string]json.RawMessage); typed {
+			merged, err = applyTypedMetadataEdits(current, set, unset)
+		} else {
+			set, err := mergeOpStrings(OpSetMetadata, updates[OpSetMetadata], hasSet)
+			if err != nil {
+				return err
+			}
+			merged, err = storage.ApplyMetadataEdits(current, set, unset)
+		}
 		if err != nil {
 			return fmt.Errorf("metadata edit failed: %w", err)
 		}
@@ -428,6 +649,43 @@ func resolveMetadataMergeOps(oldIssue *types.Issue, updates, resolved map[string
 	}
 	resolved["metadata"] = current
 	return nil
+}
+
+func applyTypedMetadataEdits(existing json.RawMessage, set map[string]json.RawMessage, unset []string) (json.RawMessage, error) {
+	data := make(map[string]json.RawMessage)
+	if len(existing) > 0 {
+		trimmed := strings.TrimSpace(string(existing))
+		if trimmed != "" && trimmed != "null" {
+			if err := json.Unmarshal(existing, &data); err != nil {
+				return nil, fmt.Errorf("existing metadata is not a JSON object: %w", err)
+			}
+		}
+	}
+	keys := make([]string, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := storage.ValidateMetadataKey(key); err != nil {
+			return nil, err
+		}
+		if !json.Valid(set[key]) {
+			return nil, fmt.Errorf("metadata value for key %q is not valid JSON", key)
+		}
+		data[key] = set[key]
+	}
+	for _, key := range unset {
+		if err := storage.ValidateMetadataKey(key); err != nil {
+			return nil, err
+		}
+		delete(data, key)
+	}
+	result, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+	return json.RawMessage(result), nil
 }
 
 // resolveNotesAppendOp folds OpAppendNotes into a concrete "notes" value on

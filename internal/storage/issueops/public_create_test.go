@@ -142,6 +142,135 @@ func TestValidatePublicCreateRequestAllowsEmptyWaitsForGate(t *testing.T) {
 	}
 }
 
+func TestValidatePublicCreateRequestRejectsInvalidImportedRelationsAndComments(t *testing.T) {
+	checks := []struct {
+		name    string
+		request publicops.CreateRequest
+	}{
+		{
+			name: "malformed dependency metadata",
+			request: publicops.CreateRequest{
+				Actor:        "actor",
+				Issue:        &publicops.Issue{Title: "title"},
+				Dependencies: []publicops.CreateDependency{{TargetID: "bd-target", Type: types.DepRelated, Metadata: "{"}},
+			},
+		},
+		{
+			name: "overlong dependency thread",
+			request: publicops.CreateRequest{
+				Actor:        "actor",
+				Issue:        &publicops.Issue{Title: "title"},
+				Dependencies: []publicops.CreateDependency{{TargetID: "bd-target", Type: types.DepRelated, ThreadID: strings.Repeat("t", types.MaxFieldLen+1)}},
+			},
+		},
+		{
+			name: "overlong comment ID",
+			request: publicops.CreateRequest{
+				Actor:    "actor",
+				Issue:    &publicops.Issue{Title: "title"},
+				Comments: []*publicops.Comment{{ID: strings.Repeat("i", 37), Text: "comment"}},
+			},
+		},
+		{
+			name: "overlong comment author",
+			request: publicops.CreateRequest{
+				Actor:    "actor",
+				Issue:    &publicops.Issue{Title: "title"},
+				Comments: []*publicops.Comment{{Author: strings.Repeat("a", types.MaxFieldLen+1), Text: "comment"}},
+			},
+		},
+		{
+			name: "empty comment text",
+			request: publicops.CreateRequest{
+				Actor:    "actor",
+				Issue:    &publicops.Issue{Title: "title"},
+				Comments: []*publicops.Comment{{}},
+			},
+		},
+		{
+			name: "overlong default comment author",
+			request: publicops.CreateRequest{
+				Actor:    strings.Repeat("a", types.MaxFieldLen+1),
+				Issue:    &publicops.Issue{Title: "title"},
+				Comments: []*publicops.Comment{{Text: "comment"}},
+			},
+		},
+	}
+
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			err := ValidatePublicCreateRequest(check.request)
+			if !errors.Is(err, storage.ErrValidation) {
+				t.Fatalf("ValidatePublicCreateRequest() error = %v, want ErrValidation", err)
+			}
+		})
+	}
+}
+
+func TestValidatePublicCreateRequestRejectsDuplicateImportedCommentIDs(t *testing.T) {
+	request := publicops.CreateRequest{
+		Actor: "actor",
+		Issue: &publicops.Issue{Title: "title"},
+		Comments: []*publicops.Comment{
+			{ID: "imported-comment", Text: "first"},
+			{ID: "imported-comment", Text: "second"},
+		},
+	}
+	if err := ValidatePublicCreateRequest(request); !errors.Is(err, storage.ErrValidation) {
+		t.Fatalf("ValidatePublicCreateRequest() error = %v, want ErrValidation", err)
+	}
+
+	request.Comments[0].ID = ""
+	request.Comments[1].ID = ""
+	if err := ValidatePublicCreateRequest(request); err != nil {
+		t.Fatalf("ValidatePublicCreateRequest() repeated generated IDs error = %v, want nil", err)
+	}
+}
+
+func TestValidatePublicCreateRequestRejectsOverlongRelationshipIDs(t *testing.T) {
+	overlong := strings.Repeat("x", types.MaxFieldLen+1)
+	checks := []struct {
+		name    string
+		request publicops.CreateRequest
+		field   string
+	}{
+		{
+			name:    "parent ID",
+			request: publicops.CreateRequest{Actor: "actor", Issue: &publicops.Issue{Title: "title"}, ParentID: overlong},
+			field:   "parent",
+		},
+		{
+			name: "dependency target ID",
+			request: publicops.CreateRequest{
+				Actor:        "actor",
+				Issue:        &publicops.Issue{Title: "title"},
+				Dependencies: []publicops.CreateDependency{{TargetID: overlong, Type: types.DepRelated}},
+			},
+			field: "dependency target",
+		},
+		{
+			name: "waits-for spawner ID",
+			request: publicops.CreateRequest{
+				Actor:    "actor",
+				Issue:    &publicops.Issue{Title: "title"},
+				WaitsFor: &publicops.WaitsFor{SpawnerID: overlong},
+			},
+			field: "waits-for spawner",
+		},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			err := ValidatePublicCreateRequest(check.request)
+			if !errors.Is(err, storage.ErrValidation) || !errors.Is(err, types.ErrFieldTooLong) {
+				t.Fatalf("ValidatePublicCreateRequest() error = %v, want ErrValidation and ErrFieldTooLong", err)
+			}
+			if !strings.Contains(err.Error(), check.field) {
+				t.Fatalf("ValidatePublicCreateRequest() error = %v, want field %q", err, check.field)
+			}
+		})
+	}
+}
+
 type sqlStateError string
 
 func (e sqlStateError) Error() string    { return string(e) }

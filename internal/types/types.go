@@ -264,13 +264,13 @@ func (w hashFieldWriter) flag(b bool, label string) {
 	w.h.Write([]byte{0})
 }
 
-// MaxFieldLen is the maximum length (in characters) of the assignee, owner, and
-// label fields, matching their VARCHAR(255) columns.
+// MaxFieldLen is the maximum length (in characters) of common bounded text
+// fields, matching their VARCHAR(255) columns.
 const MaxFieldLen = 255
 
-// ErrFieldTooLong is returned when assignee, owner, or a label exceeds
-// MaxFieldLen characters. Callers can errors.Is it instead of matching a raw
-// backend "data too long" string.
+// ErrFieldTooLong is returned when a bounded text field exceeds MaxFieldLen
+// characters. Callers can errors.Is it instead of matching a raw backend "data
+// too long" string.
 var ErrFieldTooLong = errors.New("field exceeds maximum length")
 
 // CheckFieldLen returns ErrFieldTooLong (wrapped with context) when val exceeds
@@ -280,6 +280,35 @@ var ErrFieldTooLong = errors.New("field exceeds maximum length")
 func CheckFieldLen(name, val string) error {
 	if n := utf8.RuneCountInString(val); n > MaxFieldLen {
 		return fmt.Errorf("%w: %s is %d characters (max %d)", ErrFieldTooLong, name, n, MaxFieldLen)
+	}
+	return nil
+}
+
+// ValidateIssueTitle checks the canonical issue-title requirements. The title
+// must be nonempty and at most 500 bytes.
+func ValidateIssueTitle(title string) error {
+	if len(title) == 0 {
+		return fmt.Errorf("title is required")
+	}
+	if len(title) > 500 {
+		return fmt.Errorf("title must be 500 characters or less (got %d)", len(title))
+	}
+	return nil
+}
+
+// ValidateIssuePriority checks that priority is in the canonical P0-P4 range.
+func ValidateIssuePriority(priority int) error {
+	if priority < 0 || priority > 4 {
+		return fmt.Errorf("priority must be between 0 and 4 (got %d)", priority)
+	}
+	return nil
+}
+
+// ValidateIssueEstimatedMinutes checks that a supplied estimate is
+// nonnegative. A nil estimate is valid.
+func ValidateIssueEstimatedMinutes(estimatedMinutes *int) error {
+	if estimatedMinutes != nil && *estimatedMinutes < 0 {
+		return fmt.Errorf("estimated_minutes cannot be negative")
 	}
 	return nil
 }
@@ -298,14 +327,11 @@ func (i *Issue) ValidateWithCustomStatuses(customStatuses []string) error {
 // ValidateWithCustom checks if the issue has valid field values,
 // allowing custom statuses and types in addition to built-in ones.
 func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
-	if len(i.Title) == 0 {
-		return fmt.Errorf("title is required")
+	if err := ValidateIssueTitle(i.Title); err != nil {
+		return err
 	}
-	if len(i.Title) > 500 {
-		return fmt.Errorf("title must be 500 characters or less (got %d)", len(i.Title))
-	}
-	if i.Priority < 0 || i.Priority > 4 {
-		return fmt.Errorf("priority must be between 0 and 4 (got %d)", i.Priority)
+	if err := ValidateIssuePriority(i.Priority); err != nil {
+		return err
 	}
 	if !i.Status.IsValidWithCustom(customStatuses) {
 		return fmt.Errorf("invalid status: %s", i.Status)
@@ -313,8 +339,8 @@ func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
 	if !i.IssueType.IsValidWithCustom(customTypes) {
 		return fmt.Errorf("invalid issue type: %s", i.IssueType)
 	}
-	if i.EstimatedMinutes != nil && *i.EstimatedMinutes < 0 {
-		return fmt.Errorf("estimated_minutes cannot be negative")
+	if err := ValidateIssueEstimatedMinutes(i.EstimatedMinutes); err != nil {
+		return err
 	}
 	// Enforce closed_at invariant: closed_at should be set if and only if status is closed
 	if i.Status == StatusClosed && i.ClosedAt == nil {
@@ -365,14 +391,11 @@ func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
 // since the source repo already validated them when the issue was created.
 // This implements "trust the chain below you" from the HOP federation model.
 func (i *Issue) ValidateForImport(customStatuses []string) error {
-	if len(i.Title) == 0 {
-		return fmt.Errorf("title is required")
+	if err := ValidateIssueTitle(i.Title); err != nil {
+		return err
 	}
-	if len(i.Title) > 500 {
-		return fmt.Errorf("title must be 500 characters or less (got %d)", len(i.Title))
-	}
-	if i.Priority < 0 || i.Priority > 4 {
-		return fmt.Errorf("priority must be between 0 and 4 (got %d)", i.Priority)
+	if err := ValidateIssuePriority(i.Priority); err != nil {
+		return err
 	}
 	if !i.Status.IsValidWithCustom(customStatuses) {
 		return fmt.Errorf("invalid status: %s", i.Status)
@@ -385,8 +408,8 @@ func (i *Issue) ValidateForImport(customStatuses []string) error {
 	} else if i.IssueType != "" && !i.IssueType.IsValid() {
 		// Non-built-in type - trust it (child repo already validated)
 	}
-	if i.EstimatedMinutes != nil && *i.EstimatedMinutes < 0 {
-		return fmt.Errorf("estimated_minutes cannot be negative")
+	if err := ValidateIssueEstimatedMinutes(i.EstimatedMinutes); err != nil {
+		return err
 	}
 	// Enforce closed_at invariant
 	if i.Status == StatusClosed && i.ClosedAt == nil {

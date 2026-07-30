@@ -1,15 +1,19 @@
 package issueops
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
+
+const maxPublicCommentIDLen = 36
 
 // PublicCreateContext holds the configuration required to prepare a public
 // create request for the domain create use case.
@@ -26,6 +30,9 @@ func ValidatePublicCreateRequest(request publicops.CreateRequest) error {
 	if request.Actor == "" || request.Issue == nil {
 		return publicCreateValidationError(fmt.Errorf("create: actor and issue are required"))
 	}
+	if err := types.CheckFieldLen("actor", request.Actor); err != nil {
+		return publicCreateValidationError(fmt.Errorf("create: %w", err))
+	}
 	if len(request.Issue.Comments) > 0 || len(request.Issue.Dependencies) > 0 {
 		return publicCreateValidationError(fmt.Errorf("create: issue comments and dependencies must be supplied through request fields"))
 	}
@@ -39,9 +46,28 @@ func ValidatePublicCreateRequest(request publicops.CreateRequest) error {
 			return publicCreateValidationError(err)
 		}
 	}
-	for _, comment := range request.Comments {
+	if err := types.CheckFieldLen("parent ID", request.ParentID); err != nil {
+		return publicCreateValidationError(fmt.Errorf("create: %w", err))
+	}
+	importedCommentIDs := make(map[string]struct{}, len(request.Comments))
+	for index, comment := range request.Comments {
 		if comment == nil {
 			return publicCreateValidationError(fmt.Errorf("create: comment must not be nil"))
+		}
+		if n := utf8.RuneCountInString(comment.ID); n > maxPublicCommentIDLen {
+			return publicCreateValidationError(fmt.Errorf("create: comment %d ID is %d characters (max %d)", index, n, maxPublicCommentIDLen))
+		}
+		if comment.ID != "" {
+			if _, exists := importedCommentIDs[comment.ID]; exists {
+				return publicCreateValidationError(fmt.Errorf("create: duplicate imported comment ID %q", comment.ID))
+			}
+			importedCommentIDs[comment.ID] = struct{}{}
+		}
+		if err := types.CheckFieldLen("comment author", comment.Author); err != nil {
+			return publicCreateValidationError(fmt.Errorf("create: comment %d: %w", index, err))
+		}
+		if comment.Text == "" {
+			return publicCreateValidationError(fmt.Errorf("create: comment %d text must not be empty", index))
 		}
 	}
 	return validatePublicCreateDependencies(request)
@@ -147,9 +173,18 @@ func validatePublicCreateDependencies(request publicops.CreateRequest) error {
 	if request.ParentID != "" {
 		edges = append(edges, edge{newIssue, endpointFor(request.ParentID), types.DepParentChild})
 	}
-	for _, dependency := range request.Dependencies {
+	for index, dependency := range request.Dependencies {
+		if err := types.CheckFieldLen("dependency target ID", dependency.TargetID); err != nil {
+			return publicCreateValidationError(fmt.Errorf("create: dependency %d: %w", index, err))
+		}
 		if dependency.TargetID == "" || !dependency.Type.IsValid() {
 			return publicCreateValidationError(fmt.Errorf("create: dependency target and type are required"))
+		}
+		if dependency.Metadata != "" && !json.Valid([]byte(dependency.Metadata)) {
+			return publicCreateValidationError(fmt.Errorf("create: dependency %d metadata must be valid JSON", index))
+		}
+		if err := types.CheckFieldLen("dependency thread_id", dependency.ThreadID); err != nil {
+			return publicCreateValidationError(fmt.Errorf("create: dependency %d: %w", index, err))
 		}
 		from, to := newIssue, endpointFor(dependency.TargetID)
 		if dependency.Reverse {
@@ -158,6 +193,9 @@ func validatePublicCreateDependencies(request publicops.CreateRequest) error {
 		edges = append(edges, edge{from, to, dependency.Type})
 	}
 	if request.WaitsFor != nil {
+		if err := types.CheckFieldLen("waits-for spawner ID", request.WaitsFor.SpawnerID); err != nil {
+			return publicCreateValidationError(fmt.Errorf("create: %w", err))
+		}
 		if request.WaitsFor.SpawnerID == "" || (request.WaitsFor.Gate != "" && request.WaitsFor.Gate != string(types.WaitsForAllChildren) && request.WaitsFor.Gate != string(types.WaitsForAnyChildren)) {
 			return publicCreateValidationError(fmt.Errorf("create: waits-for spawner and gate are invalid"))
 		}
