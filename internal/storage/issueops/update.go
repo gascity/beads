@@ -631,7 +631,8 @@ func resolveMetadataMergeOps(oldIssue *types.Issue, updates, resolved map[string
 		if set, typed := updates[OpSetMetadata].(map[string]json.RawMessage); typed {
 			merged, err = applyTypedMetadataEdits(current, set, unset)
 		} else {
-			set, err := mergeOpStrings(OpSetMetadata, updates[OpSetMetadata], hasSet)
+			var set []string
+			set, err = mergeOpStrings(OpSetMetadata, updates[OpSetMetadata], hasSet)
 			if err != nil {
 				return err
 			}

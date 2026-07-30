@@ -2,6 +2,7 @@ package issueops
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -51,6 +52,21 @@ func TestResolveMergeOpsSetMetadataKeepsCLIListForms(t *testing.T) {
 		}
 		if metadata["keep"] != "yes" || metadata["first"] != "one" || metadata["second"] != "two" {
 			t.Fatalf("ResolveMergeOps(%T) metadata = %#v", set, metadata)
+		}
+	}
+}
+
+func TestResolveMergeOpsSurfacesUntypedSetMetadataFailure(t *testing.T) {
+	for _, set := range []any{
+		[]string{"missing-separator"},
+		[]any{"missing-separator"},
+	} {
+		resolved, err := ResolveMergeOps(&types.Issue{Metadata: json.RawMessage(`{"keep":"yes"}`)}, map[string]any{OpSetMetadata: set})
+		if err == nil {
+			t.Fatalf("ResolveMergeOps(%T) error = nil, want a metadata edit failure; resolved = %#v", set, resolved)
+		}
+		if !strings.Contains(err.Error(), "metadata edit failed") {
+			t.Fatalf("ResolveMergeOps(%T) error = %v, want it wrapped as a metadata edit failure", set, err)
 		}
 	}
 }
