@@ -35,6 +35,14 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	}
 	issue := attempt.Issue
 	issue.Comments = attempt.Comments
+	// Configured infra types live in the wisp tables, the same routing the
+	// stores' own CreateIssue applies (internal/storage/dolt/issues.go). Mark
+	// the issue before its ID is assigned so ID generation, the create-only
+	// guard, and table routing all agree on the destination. A no-history
+	// create keeps its own retention mode.
+	if !issue.Ephemeral && !issue.NoHistory && ResolveInfraTypesInTx(ctx, tx)[string(issue.IssueType)] {
+		issue.Ephemeral = true
+	}
 	if attempt.InheritLabelsFromParent && attempt.ParentID != "" {
 		labels, err := GetLabelsInTx(ctx, tx, "", attempt.ParentID)
 		if err != nil {
