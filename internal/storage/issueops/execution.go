@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -63,9 +64,18 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 		return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
 	}
 	issue.Dependencies = CreatePublicCreateDependencies(issue.ID, attempt)
-	created, err := CreateIssuesInTxWithResult(ctx, tx, []*types.Issue{issue}, attempt.Actor, storage.BatchCreateOptions{CreateOnly: true, OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: attempt.ForceIDPrefix})
+	var skipped []skippedDependency
+	created, err := CreateIssuesInTxWithResult(ctx, tx, []*types.Issue{issue}, attempt.Actor, storage.BatchCreateOptions{
+		CreateOnly: true, OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: attempt.ForceIDPrefix,
+		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
+			skipped = append(skipped, skippedDependency{issueID: issueID, dependsOnID: dependsOnID, reason: reason})
+		},
+	})
 	if err != nil {
 		return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
+	}
+	if len(skipped) > 0 {
+		return publicops.CreateResult{}, nil, publicCreateValidationError(skippedDependencyError(skipped))
 	}
 	tables := ChangedTables{}
 	tables.Merge(CreateIssuesDirtyTables(ctx, []*types.Issue{issue}, created))
@@ -77,6 +87,23 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 		return publicops.CreateResult{}, nil, err
 	}
 	return publicops.CreateResult{Issue: hydrated}, tables, nil
+}
+
+// skippedDependency records an edge the batch engine declined to write.
+type skippedDependency struct{ issueID, dependsOnID, reason string }
+
+// skippedDependencyError refuses a guarded create whose requested edges were
+// not all written. The batch engine drops a dangling edge so a partial import
+// still lands, but a guarded create that reported success while silently
+// discarding a parent, waits-for, or explicit dependency is data loss: the
+// caller has no way to learn the relationship is missing. Refusing rolls the
+// whole create back with the enclosing transaction.
+func skippedDependencyError(skipped []skippedDependency) error {
+	edges := make([]string, 0, len(skipped))
+	for _, edge := range skipped {
+		edges = append(edges, fmt.Sprintf("%s -> %s (%s)", edge.issueID, edge.dependsOnID, edge.reason))
+	}
+	return fmt.Errorf("create: dependencies could not be created: %s: %w", strings.Join(edges, "; "), storage.ErrNotFound)
 }
 
 // ExecuteUpdate applies a guarded update in tx and reports durable tables changed.
