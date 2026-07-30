@@ -142,7 +142,7 @@ func publicCreateIssue(source *types.Issue) *types.Issue {
 		Assignee: source.Assignee, Owner: source.Owner, EstimatedMinutes: cloneInt(source.EstimatedMinutes),
 		CreatedAt: source.CreatedAt, CreatedBy: source.CreatedBy, UpdatedAt: source.UpdatedAt,
 		StartedAt: cloneTime(source.StartedAt), ClosedAt: cloneTime(source.ClosedAt), CloseReason: source.CloseReason, ClosedBySession: source.ClosedBySession,
-		DueAt: cloneTime(source.DueAt), DeferUntil: cloneTime(source.DeferUntil), ExternalRef: cloneString(source.ExternalRef), SourceSystem: source.SourceSystem,
+		DueAt: cloneTime(source.DueAt), DeferUntil: cloneTime(source.DeferUntil), ExternalRef: cloneString(source.ExternalRef), SourceSystem: source.SourceSystem, SourceRepo: source.SourceRepo,
 		Metadata: cloneRawMessage(source.Metadata), Labels: append([]string(nil), source.Labels...), Sender: source.Sender,
 		Ephemeral: source.Ephemeral, NoHistory: source.NoHistory, WispType: source.WispType, StorageClass: source.StorageClass,
 		Pinned: source.Pinned, IsTemplate: source.IsTemplate, BondedFrom: append([]types.BondRef(nil), source.BondedFrom...),

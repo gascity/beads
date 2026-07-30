@@ -19,7 +19,7 @@ func TestPreparePublicCreateRequestNormalizesAcceptedFieldsAndIgnoresDerivedFiel
 	request := publicops.CreateRequest{Actor: "actor", Issue: &publicops.Issue{
 		ID: "bd-public-create", Title: "title", Status: "custom", Priority: 2, IssueType: "custom-type",
 		Metadata: json.RawMessage(`{"key":true}`), ContentHash: "caller-hash", RowVersion: 42,
-		LeaseExpiresAt: &createdAt, CompactionLevel: 4, SourceRepo: "ignored", IDPrefix: "ignored", PrefixOverride: "ignored", IsLitePartial: true,
+		LeaseExpiresAt: &createdAt, CompactionLevel: 4, IDPrefix: "ignored", PrefixOverride: "ignored", IsLitePartial: true,
 	}, Comments: []*publicops.Comment{{IssueID: "caller", Text: "comment"}}}
 
 	prepared, err := PreparePublicCreateRequest(request, PublicCreateContext{
@@ -28,11 +28,24 @@ func TestPreparePublicCreateRequestNormalizesAcceptedFieldsAndIgnoresDerivedFiel
 	if err != nil {
 		t.Fatalf("PreparePublicCreateRequest() error = %v", err)
 	}
-	if prepared.Issue.ContentHash == "caller-hash" || prepared.Issue.RowVersion != 0 || prepared.Issue.LeaseExpiresAt != nil || prepared.Issue.CompactionLevel != 0 || prepared.Issue.SourceRepo != "" || prepared.Issue.IDPrefix != "" || prepared.Issue.PrefixOverride != "" || prepared.Issue.IsLitePartial {
+	if prepared.Issue.ContentHash == "caller-hash" || prepared.Issue.RowVersion != 0 || prepared.Issue.LeaseExpiresAt != nil || prepared.Issue.CompactionLevel != 0 || prepared.Issue.IDPrefix != "" || prepared.Issue.PrefixOverride != "" || prepared.Issue.IsLitePartial {
 		t.Fatalf("derived fields survived preparation: %#v", prepared.Issue)
 	}
 	if prepared.Comments[0].IssueID != "" || prepared.Comments[0].Author != "actor" {
 		t.Fatalf("comment normalization = %#v", prepared.Comments[0])
+	}
+}
+
+func TestPreparePublicCreateRequestCarriesSourceRepo(t *testing.T) {
+	prepared, err := PreparePublicCreateRequest(publicops.CreateRequest{Actor: "actor", Issue: &publicops.Issue{
+		ID: "bd-source-repo", Title: "title", IssueType: types.TypeTask, Priority: 2,
+		SourceSystem: "github", SourceRepo: "other/repo",
+	}}, PublicCreateContext{IssuePrefix: "bd"})
+	if err != nil {
+		t.Fatalf("PreparePublicCreateRequest() error = %v", err)
+	}
+	if prepared.Issue.SourceRepo != "other/repo" || prepared.Issue.SourceSystem != "github" {
+		t.Fatalf("prepared source = %q/%q, want github/other/repo", prepared.Issue.SourceSystem, prepared.Issue.SourceRepo)
 	}
 }
 
@@ -41,7 +54,7 @@ func TestPublicCreateIssueFieldClassificationIsComplete(t *testing.T) {
 		"ID": true, "Title": true, "Description": true, "Design": true, "AcceptanceCriteria": true, "Notes": true, "SpecID": true,
 		"Status": true, "Priority": true, "IssueType": true, "Assignee": true, "Owner": true, "EstimatedMinutes": true,
 		"CreatedAt": true, "CreatedBy": true, "UpdatedAt": true, "StartedAt": true, "ClosedAt": true, "CloseReason": true, "ClosedBySession": true,
-		"DueAt": true, "DeferUntil": true, "ExternalRef": true, "SourceSystem": true, "Metadata": true, "Labels": true,
+		"DueAt": true, "DeferUntil": true, "ExternalRef": true, "SourceSystem": true, "SourceRepo": true, "Metadata": true, "Labels": true,
 		"Sender": true, "Ephemeral": true, "NoHistory": true, "WispType": true, "StorageClass": true, "Pinned": true, "IsTemplate": true,
 		"BondedFrom": true, "AwaitType": true, "AwaitID": true, "Timeout": true, "Waiters": true, "SourceFormula": true, "SourceLocation": true,
 		"MolType": true, "WorkType": true, "EventKind": true, "Actor": true, "Target": true, "Payload": true,
@@ -49,7 +62,7 @@ func TestPublicCreateIssueFieldClassificationIsComplete(t *testing.T) {
 	ignored := map[string]bool{
 		"ContentHash": true, "LeaseExpiresAt": true, "HeartbeatAt": true, "LeaseGrantedNode": true, "RowVersion": true,
 		"CompactionLevel": true, "CompactedAt": true, "CompactedAtCommit": true, "OriginalSize": true,
-		"SourceRepo": true, "IDPrefix": true, "PrefixOverride": true, "IsLitePartial": true,
+		"IDPrefix": true, "PrefixOverride": true, "IsLitePartial": true,
 	}
 	rejected := map[string]bool{"Dependencies": true, "Comments": true}
 	issueType := reflect.TypeFor[types.Issue]()
