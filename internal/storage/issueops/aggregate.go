@@ -133,13 +133,34 @@ func sameOptionalTime(left, right *time.Time) bool {
 	return left == nil && right == nil || left != nil && right != nil && left.Equal(*right)
 }
 
-// ValidateUpdateRequest checks mutually exclusive guarded-update options.
+// ValidateUpdateRequest checks mutually exclusive guarded-update options and
+// the canonical field values every backend must reject identically. Backends
+// call it before touching the row so an invalid patch cannot half-apply.
 func ValidateUpdateRequest(request publicops.UpdateRequest) error {
 	if request.Claim && (request.ExpectedAssignee != nil || request.ExpectedStatus != nil) {
 		return fmt.Errorf("%w: claim cannot use expected assignee or status", storage.ErrValidation)
 	}
 	if request.ForceAssigneeTransfer && (request.Claim || !request.Patch.Assignee.Set || request.ExpectedAssignee != nil) {
 		return fmt.Errorf("%w: invalid forced assignee transfer", storage.ErrValidation)
+	}
+	patch := request.Patch
+	if patch.Title.Set {
+		if err := types.ValidateIssueTitle(patch.Title.Value); err != nil {
+			return fmt.Errorf("%w: update title: %w", storage.ErrValidation, err)
+		}
+	}
+	if patch.Priority.Set {
+		if err := types.ValidateIssuePriority(patch.Priority.Value); err != nil {
+			return fmt.Errorf("%w: update priority: %w", storage.ErrValidation, err)
+		}
+	}
+	if patch.EstimatedMinutes.Set {
+		if err := types.ValidateIssueEstimatedMinutes(patch.EstimatedMinutes.Value); err != nil {
+			return fmt.Errorf("%w: update estimated_minutes: %w", storage.ErrValidation, err)
+		}
+	}
+	if patch.Persistence.Set && !patch.Persistence.Value.IsValid() {
+		return fmt.Errorf("%w: invalid persistence mode %q", storage.ErrValidation, patch.Persistence.Value)
 	}
 	return nil
 }
@@ -206,6 +227,21 @@ func ApplyMetadataPatch(current json.RawMessage, patch publicops.MetadataPatch) 
 	if !patch.Replace.Set && !patch.Merge.Set && len(patch.Set) == 0 && len(patch.Unset) == 0 {
 		return current, false, nil
 	}
+	setKeys := make([]string, 0, len(patch.Set))
+	for key := range patch.Set {
+		setKeys = append(setKeys, key)
+	}
+	sort.Strings(setKeys)
+	for _, key := range setKeys {
+		if err := storage.ValidateMetadataKey(key); err != nil {
+			return nil, false, fmt.Errorf("%w: %w", storage.ErrValidation, err)
+		}
+	}
+	for _, key := range patch.Unset {
+		if err := storage.ValidateMetadataKey(key); err != nil {
+			return nil, false, fmt.Errorf("%w: %w", storage.ErrValidation, err)
+		}
+	}
 	var next json.RawMessage
 	if patch.Replace.Set {
 		next = append(json.RawMessage(nil), patch.Replace.Value...)
@@ -218,6 +254,11 @@ func ApplyMetadataPatch(current json.RawMessage, patch publicops.MetadataPatch) 
 	} else {
 		next = append(json.RawMessage(nil), current...)
 		if patch.Merge.Set {
+			// A JSON null unmarshals into a nil overlay map, so the merge
+			// below would silently accept it as "change nothing".
+			if strings.TrimSpace(string(patch.Merge.Value)) == "null" {
+				return nil, false, fmt.Errorf("%w: metadata merge must be a JSON object", storage.ErrValidation)
+			}
 			merged, err := storage.MergeMetadataJSON(next, patch.Merge.Value)
 			if err != nil {
 				return nil, false, fmt.Errorf("%w: metadata merge: %v", storage.ErrValidation, err)
@@ -231,12 +272,7 @@ func ApplyMetadataPatch(current json.RawMessage, patch publicops.MetadataPatch) 
 					return nil, false, fmt.Errorf("%w: metadata edits require an object: %v", storage.ErrValidation, err)
 				}
 			}
-			keys := make([]string, 0, len(patch.Set))
-			for key := range patch.Set {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			for _, key := range keys {
+			for _, key := range setKeys {
 				value := patch.Set[key]
 				if !json.Valid(value) {
 					return nil, false, fmt.Errorf("%w: metadata value for key %q is not valid JSON", storage.ErrValidation, key)

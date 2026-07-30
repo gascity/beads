@@ -239,11 +239,14 @@ func updateSpec(request publicops.UpdateRequest) (domain.UpdateSpec, error) {
 		fields[storageissueops.OpAppendNotes] = patch.AppendNotes.Value
 	}
 	if patch.Metadata.Replace.Set {
-		if len(patch.Metadata.Replace.Value) == 0 {
-			fields["metadata"] = json.RawMessage("{}")
-		} else {
-			fields["metadata"] = patch.Metadata.Replace.Value
+		replacement := json.RawMessage("{}")
+		if len(patch.Metadata.Replace.Value) > 0 {
+			replacement = patch.Metadata.Replace.Value
 		}
+		if err := storageissueops.ValidateMetadataIfConfigured(replacement); err != nil {
+			return domain.UpdateSpec{}, validationError(err)
+		}
+		fields["metadata"] = replacement
 	} else {
 		if patch.Metadata.Merge.Set {
 			fields[storageissueops.OpMergeMetadata] = patch.Metadata.Merge.Value
@@ -425,37 +428,11 @@ func validateUpdateRequest(request publicops.UpdateRequest) error {
 	if request.Actor == "" || request.IssueID == "" {
 		return validationError(fmt.Errorf("update: actor and issue ID must not be empty"))
 	}
-	if request.Patch.Title.Set {
-		if err := types.ValidateIssueTitle(request.Patch.Title.Value); err != nil {
-			return validationError(fmt.Errorf("update title: %w", err))
-		}
-	}
-	if request.Patch.Priority.Set {
-		if err := types.ValidateIssuePriority(request.Patch.Priority.Value); err != nil {
-			return validationError(fmt.Errorf("update priority: %w", err))
-		}
-	}
-	if request.Patch.EstimatedMinutes.Set {
-		if err := types.ValidateIssueEstimatedMinutes(request.Patch.EstimatedMinutes.Value); err != nil {
-			return validationError(fmt.Errorf("update estimated_minutes: %w", err))
-		}
-	}
-	if request.Claim && (request.ExpectedAssignee != nil || request.ExpectedStatus != nil) {
-		return validationError(fmt.Errorf("update: claim cannot use expected assignee or status"))
-	}
-	if request.ForceAssigneeTransfer && (request.Claim || !request.Patch.Assignee.Set || request.ExpectedAssignee != nil) {
-		return validationError(fmt.Errorf("update: force assignee transfer requires a non-claim assignee patch without expected assignee"))
-	}
-	metadata := request.Patch.Metadata
-	if err := validateMetadataPatch(metadata); err != nil {
+	if err := storageissueops.ValidateUpdateRequest(request); err != nil {
 		return validationError(err)
 	}
-	if request.Patch.Persistence.Set {
-		switch request.Patch.Persistence.Value {
-		case publicops.PersistenceModePersistent, publicops.PersistenceModeEphemeral, publicops.PersistenceModeNoHistory:
-		default:
-			return validationError(fmt.Errorf("update: invalid persistence mode %q", request.Patch.Persistence.Value))
-		}
+	if err := validateMetadataPatch(request.Patch.Metadata); err != nil {
+		return validationError(err)
 	}
 	return nil
 }
