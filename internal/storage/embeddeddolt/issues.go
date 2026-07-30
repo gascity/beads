@@ -185,7 +185,7 @@ func (s *EmbeddedDoltStore) CloseIssueChecked(ctx context.Context, id string, ac
 		if err != nil {
 			return err
 		}
-		result = storage.CloseIssueResult{Unchanged: res.AlreadyClosed}
+		result = storage.CloseIssueResult{Unchanged: res.AlreadyClosed, OpenChildren: res.OpenChildren}
 		return nil
 	})
 	if err != nil {

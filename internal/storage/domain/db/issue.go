@@ -896,6 +896,19 @@ func (r *issueSQLRepositoryImpl) Close(ctx context.Context, id string, params do
 	}, nil
 }
 
+func (r *issueSQLRepositoryImpl) CloseChecked(ctx context.Context, id string, params domain.CloseRowParams, actor string, force bool) (domain.CloseRowResult, error) {
+	res, err := issueops.CloseIssueCheckedInTx(ctx, r.runner, id, params.Reason, actor, params.Session, force, nil)
+	if err != nil {
+		return domain.CloseRowResult{}, fmt.Errorf("db: IssueSQLRepository.CloseChecked %s: %w", id, err)
+	}
+	return domain.CloseRowResult{
+		Updated:       !res.AlreadyClosed,
+		AlreadyClosed: res.AlreadyClosed,
+		IsWisp:        res.IsWisp,
+		OpenChildren:  res.OpenChildren,
+	}, nil
+}
+
 func (r *issueSQLRepositoryImpl) Reopen(ctx context.Context, id string, params domain.ReopenRowParams, actor string, opts domain.IssueTableOpts) (domain.ReopenRowResult, error) {
 	res, err := issueops.ReopenIssueInTx(ctx, r.runner, id, params.Reason, actor)
 	if err != nil {

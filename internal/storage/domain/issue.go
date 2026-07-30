@@ -58,6 +58,7 @@ type IssueSQLRepository interface {
 	AffectedByDeletion(ctx context.Context, issueIDs, wispIDs []string) (affectedIssues, affectedWisps []string, err error)
 	RecomputeIsBlocked(ctx context.Context, issueIDs, wispIDs []string) error
 	Close(ctx context.Context, id string, params CloseRowParams, actor string, opts IssueTableOpts) (CloseRowResult, error)
+	CloseChecked(ctx context.Context, id string, params CloseRowParams, actor string, force bool) (CloseRowResult, error)
 	Reopen(ctx context.Context, id string, params ReopenRowParams, actor string, opts IssueTableOpts) (ReopenRowResult, error)
 	GetNewlyUnblockedByClose(ctx context.Context, closedID string) ([]*types.Issue, error)
 	ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (*types.Issue, error)
@@ -83,6 +84,7 @@ type CloseRowResult struct {
 	Updated       bool
 	AlreadyClosed bool
 	IsWisp        bool
+	OpenChildren  int
 }
 
 type ReopenRowParams struct {
@@ -314,8 +316,9 @@ type CloseIssueParams struct {
 }
 
 type CloseIssueResult struct {
-	Issue  *types.Issue
-	Closed bool
+	Issue        *types.Issue
+	Closed       bool
+	OpenChildren int
 }
 
 type ReopenIssueParams struct {
@@ -1388,82 +1391,32 @@ func (u *issueUseCaseImpl) CloseWisp(ctx context.Context, id string, params Clos
 	return u.close(ctx, id, params, actor, true)
 }
 
-// CloseIssueChecked closes an issue, refusing with storage.ErrCloseBlocked when
-// the issue has a live, open direct blocker unless force is set. The blocker
-// check (IsBlocked) and the close (CloseIssue) run through the same unit-of-work
-// transaction, so this is a single enforcement point rather than a re-check of
-// separate reads. When force is set or the guard passes it delegates to the
-// unchecked CloseIssue, preserving its CloseIssueResult semantics exactly.
+// CloseIssueChecked closes an issue through the shared guarded close path.
 func (u *issueUseCaseImpl) CloseIssueChecked(ctx context.Context, id string, params CloseIssueParams, actor string, force bool) (CloseIssueResult, error) {
 	return u.closeChecked(ctx, id, params, actor, force, false)
 }
 
-// CloseWispChecked is the wisp twin of CloseIssueChecked: it applies the same
-// live-direct-blocker guard (via IsWispBlocked) before delegating to the
-// unchecked CloseWisp.
+// CloseWispChecked is the wisp twin of CloseIssueChecked.
 func (u *issueUseCaseImpl) CloseWispChecked(ctx context.Context, id string, params CloseIssueParams, actor string, force bool) (CloseIssueResult, error) {
 	return u.closeChecked(ctx, id, params, actor, force, true)
 }
 
-// isClosed reports whether the issue (or wisp) identified by id is already in
-// the closed status, read in the same unit of work as the close so the check
-// and the close cannot straddle a concurrent state change. A missing row (or,
-// for a wisp source, a missing optional wisps table) reports not-closed so
-// closeChecked falls through to u.close, whose repo Close surfaces the not-found
-// result — mirroring issueops.isClosedInTx on the embedded checked-close path.
-func (u *issueUseCaseImpl) isClosed(ctx context.Context, id string, useWisp bool) (bool, error) {
-	issue, err := u.issueRepo.Get(ctx, id, IssueTableOpts{UseWispsTable: useWisp})
-	if err != nil {
-		if dberrors.IsNoRows(err) || dberrors.IsTableNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	if issue == nil {
-		return false, nil
-	}
-	return issue.Status == types.StatusClosed, nil
-}
-
 func (u *issueUseCaseImpl) closeChecked(ctx context.Context, id string, params CloseIssueParams, actor string, force, useWisp bool) (CloseIssueResult, error) {
-	if !force {
-		// The blocked guard only has meaning for an open→closed transition. An
-		// already-closed row is an idempotent no-op (Closed=false per the
-		// Storage.CloseIssueChecked contract), so detect that first: a closed row
-		// can still carry a stale is_blocked=1 (e.g. after a cross-clone Dolt
-		// merge, a state GetStatistics filters as `is_blocked = 1 AND status <>
-		// 'closed'`) whose live direct blocker would otherwise refuse the
-		// idempotent re-close with ErrCloseBlocked. This mirrors
-		// issueops.CloseIssueCheckedInTx, which runs isClosedInTx before the
-		// is_blocked guard; u.close below is the sole detector of the
-		// already-closed no-op (matching the Force path, which reaches
-		// Closed=false by skipping the guard).
-		closed, err := u.isClosed(ctx, id, useWisp)
-		if err != nil {
-			return CloseIssueResult{}, err
-		}
-		if !closed {
-			var (
-				blocked  bool
-				blockers []string
-			)
-			if useWisp {
-				blocked, blockers, err = u.depUC.IsWispBlocked(ctx, id)
-			} else {
-				blocked, blockers, err = u.depUC.IsBlocked(ctx, id)
-			}
-			if err != nil {
-				return CloseIssueResult{}, err
-			}
-			// Refuse only on a live, open direct blocker. A bare is_blocked=1 with no
-			// live direct blocker (a purely transitive block) closes — matching the
-			// historical `bd close` predicate and the embedded checked-close path.
-			if blocked && len(blockers) > 0 {
-				return CloseIssueResult{}, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
-			}
-		}
+	if id == "" {
+		return CloseIssueResult{}, fmt.Errorf("close: id must not be empty")
 	}
-	return u.close(ctx, id, params, actor, useWisp)
+	if actor == "" {
+		return CloseIssueResult{}, fmt.Errorf("close: actor must not be empty")
+	}
+	row, err := u.issueRepo.CloseChecked(ctx, id, CloseRowParams{Reason: params.Reason, Session: params.Session}, actor, force)
+	if err != nil {
+		return CloseIssueResult{}, fmt.Errorf("close %s: %w", id, err)
+	}
+	issue, err := u.issueRepo.Get(ctx, id, IssueTableOpts{UseWispsTable: row.IsWisp || useWisp})
+	if err != nil {
+		return CloseIssueResult{}, fmt.Errorf("close %s: reload: %w", id, err)
+	}
+	return CloseIssueResult{Issue: issue, Closed: !row.AlreadyClosed, OpenChildren: row.OpenChildren}, nil
 }
 
 func (u *issueUseCaseImpl) close(ctx context.Context, id string, params CloseIssueParams, actor string, useWisp bool) (CloseIssueResult, error) {

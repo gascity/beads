@@ -150,8 +150,9 @@ type Storage interface {
 	UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error
 	UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error
 	CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error
-	// CloseIssueChecked closes an issue, but refuses with ErrCloseBlocked when
-	// the issue has a live direct blocker (an open blocks/waits-for/
+	// CloseIssueChecked closes an issue, but refuses with ErrCloseOpenChildren
+	// when it has open parent-child dependents, or ErrCloseBlocked when it has a
+	// live direct blocker (an open blocks/waits-for/
 	// conditional-blocks edge) unless opts.Force is set — the historical
 	// `bd close` guard. A bare is_blocked=1 with no live direct blocker (a purely
 	// transitive parent-child block, or a stale column) is not refused. The
@@ -342,7 +343,7 @@ type CloseIssueOptions struct {
 	// ErrVersionMismatch atomically (the version read and the close share one
 	// transaction). nil disables the check, leaving behavior unchanged. It is a
 	// pointer, not an int64, so nil ("no check") is distinct from a caller that
-	// requires version 0. Force bypasses only the is_blocked guard, not this
+	// requires version 0. Force bypasses child and blocker policy, not this
 	// version check.
 	//
 	// RowVersion tracks lifecycle/ownership writes only — it is rewritten by
@@ -357,7 +358,8 @@ type CloseIssueOptions struct {
 
 // CloseIssueResult reports the outcome of CloseIssueChecked.
 type CloseIssueResult struct {
-	Unchanged bool // true when the issue was ALREADY closed (idempotent no-op)
+	Unchanged    bool // true when the issue was ALREADY closed (idempotent no-op)
+	OpenChildren int  // nonzero when Force encountered open children, including idempotent re-closes
 }
 
 // UpdateIssueOptions carries the optional inputs to UpdateIssueChecked.

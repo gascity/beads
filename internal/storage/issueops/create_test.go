@@ -431,6 +431,9 @@ func TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking(t *testing.T
 		mock.ExpectExec("INSERT INTO dependencies").
 			WithArgs(depid.New(pair[0], pair[1]), pair[0], pair[1], types.DepParentChild, "tester", sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec("REPLACE INTO local_metadata").
+			WithArgs(dependencyCoordinationKey(pair[1], dependencyCoordinationDurableTier), sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(1, 1))
 	}
 	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
 		WithArgs("bd-grand").

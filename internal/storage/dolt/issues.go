@@ -654,7 +654,7 @@ func (s *DoltStore) CloseIssueChecked(ctx context.Context, id string, actor stri
 		if err != nil {
 			return err
 		}
-		result = storage.CloseIssueResult{Unchanged: res.AlreadyClosed}
+		result = storage.CloseIssueResult{Unchanged: res.AlreadyClosed, OpenChildren: res.OpenChildren}
 
 		// Dolt versioning for permanent issues.
 		// GH#2455: Stage only the tables we modified, then commit without -A.

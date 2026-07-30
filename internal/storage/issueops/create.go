@@ -850,6 +850,11 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 			}
 			if rowsAffected > 0 {
 				result.markChanged(item.depTable)
+				if dep.Type == types.DepParentChild {
+					if err := TouchDependencyCoordinationTableInTx(ctx, tx, dep.DependsOnID, item.depTable); err != nil {
+						return result, err
+					}
+				}
 			}
 		}
 	}
