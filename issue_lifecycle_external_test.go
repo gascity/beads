@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -13,18 +14,44 @@ import (
 	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
-func TestNewIssueOperationsExposesTypedUnsupportedError(t *testing.T) {
-	operations, err := beads.NewIssueOperations(nil)
-	if operations != nil {
-		t.Fatalf("NewIssueOperations() operations = %T, want nil", operations)
+// TestIssueLifecycleLayersHooksOutsideTelemetry pins the decorator order the
+// accessor produces against the order cmd/bd assembles the chain in
+// (storage_chain.go: telemetry first, hooks outermost). Each decorator layers
+// itself onto the inner result, so the lifecycle comes back stacked the same
+// way the store is.
+func TestIssueLifecycleLayersHooksOutsideTelemetry(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	lifecycle, err := storage.NewHookFiringStore(instrumented, nil).IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle() error = %v", err)
+	}
+	if got := reflect.TypeOf(lifecycle).String(); got != "*storage.hookIssueOperations" {
+		t.Fatalf("outer layer = %s, want the hook wrapper", got)
+	}
+}
+
+// TestIssueLifecycleExposesTypedUnsupportedError pins the typed error a backend
+// returns when it cannot serve guarded mutations, reachable through the public
+// alias without importing internal/storage.
+func TestIssueLifecycleExposesTypedUnsupportedError(t *testing.T) {
+	lifecycle, err := (*dolt.DoltStore)(nil).IssueLifecycle()
+	if lifecycle != nil {
+		t.Fatalf("IssueLifecycle() lifecycle = %T, want nil", lifecycle)
 	}
 	var unsupported *beads.ErrUnsupported
 	if !errors.As(err, &unsupported) {
-		t.Fatalf("NewIssueOperations() error = %v, want *beads.ErrUnsupported", err)
+		t.Fatalf("IssueLifecycle() error = %v, want *beads.ErrUnsupported", err)
 	}
 }
 
@@ -62,7 +89,7 @@ func TestHookDecoratedIssueOperationsCreateFiresReverseDependencyUpdate(t *testi
 			t.Fatal(err)
 		}
 	}
-	operations, err := beads.NewIssueOperations(storage.NewHookFiringStore(rawStore, hooks.NewRunner(hooksDir)))
+	operations, err := storage.NewHookFiringStore(rawStore, hooks.NewRunner(hooksDir)).IssueLifecycle()
 	if err != nil {
 		t.Fatal(err)
 	}

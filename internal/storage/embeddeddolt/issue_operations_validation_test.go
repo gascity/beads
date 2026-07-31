@@ -7,22 +7,21 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // TestEmbeddedIssueOperationsRejectsInvalidUpdatesWithoutMutation pins the
-// shared update validation on the backend the public constructor picks, so a
-// request the unit-of-work backend refuses is refused here too — and refused
-// before any field in the same patch reaches the row.
+// shared update validation on this backend's own lifecycle, so a request the
+// unit-of-work backend refuses is refused here too — and refused before any
+// field in the same patch reaches the row.
 func TestEmbeddedIssueOperationsRejectsInvalidUpdatesWithoutMutation(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	te := newTestEnv(t, "ops_validation")
 	ctx := t.Context()
-	operations, err := beads.NewIssueOperations(te.store)
+	operations, err := te.store.IssueLifecycle()
 	if err != nil {
-		t.Fatalf("NewIssueOperations: %v", err)
+		t.Fatalf("IssueLifecycle: %v", err)
 	}
 	issue := &types.Issue{ID: "ops_validation-1", Title: "original", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Metadata: json.RawMessage(`{"keep":"yes"}`)}
 	if err := te.store.CreateIssue(ctx, issue, "seed"); err != nil {
