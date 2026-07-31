@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -82,24 +83,53 @@ func TestUpdateClosePolicyDirectCrossesIntoDone(t *testing.T) {
 }
 
 // TestUpdateClosePolicyDirectForceWithoutAssignee pins how the direct path
-// treats a bare `--force`. The flag's only meaning today is the assignee
-// fence, and the CLI hands it to the facade unconditionally, so a `--force`
-// with no `-a` to authorize is rejected as an invalid request.
+// treats a bare `--force`. The flag now carries a second override that stands
+// on its own, so `--force` with no `-a` is a legitimate request: the assignee
+// half is simply not asserted, and the update applies.
 func TestUpdateClosePolicyDirectForceWithoutAssignee(t *testing.T) {
 	env := newParityEnv(t)
 	env.seed("test-ucpf", "Force without assignee", nil)
 
 	env.setFlags(updateCmd, map[string]string{"status": "closed", "force": "true"})
 	res := env.run(updateCmd, "test-ucpf")
-	// CHARACTERIZATION: rejected, and the status never lands.
-	if res.exitCode != 1 {
-		t.Fatalf("exit = %d, want 1\nstderr:\n%s", res.exitCode, res.stderr)
+	if res.exitCode != 0 {
+		t.Fatalf("exit = %d, want 0\nstderr:\n%s", res.exitCode, res.stderr)
 	}
-	if !strings.Contains(res.stderr, "invalid forced assignee transfer") {
-		t.Errorf("stderr lacks the assignee-fence validation refusal:\n%s", res.stderr)
+	if strings.Contains(res.stderr, "invalid forced assignee transfer") {
+		t.Errorf("--force without -a still asserts the assignee fence:\n%s", res.stderr)
 	}
-	if got := env.get("test-ucpf").Status; got != types.StatusOpen {
-		t.Errorf("status = %q after a rejected request, want open", got)
+	if got := env.get("test-ucpf").Status; got != types.StatusClosed {
+		t.Errorf("status = %q, want closed", got)
+	}
+}
+
+// TestUpdateClosePolicyDirectForceStillFencesAssigneeTransfer keeps the other
+// half of `--force` intact. Conditioning it on an assignee edit must not turn
+// it off when there IS one: a transfer away from a live foreign claim is still
+// exactly what the flag authorizes.
+func TestUpdateClosePolicyDirectForceStillFencesAssigneeTransfer(t *testing.T) {
+	env := newParityEnv(t)
+	env.seed("test-ucpa", "Held by another actor", func(i *types.Issue) {
+		i.Assignee = "someone-else"
+		i.Status = types.StatusInProgress
+	})
+
+	// Without --force the fence holds.
+	env.setFlags(updateCmd, map[string]string{"assignee": "thief"})
+	if res := env.run(updateCmd, "test-ucpa"); res.exitCode == 0 {
+		t.Fatalf("unforced transfer succeeded; the fence is gone\nstderr:\n%s", res.stderr)
+	}
+	if got := env.get("test-ucpa").Assignee; got != "someone-else" {
+		t.Fatalf("assignee = %q after a refused transfer, want someone-else", got)
+	}
+
+	// With it, the transfer is authorized.
+	env.setFlags(updateCmd, map[string]string{"assignee": "thief", "force": "true"})
+	if res := env.run(updateCmd, "test-ucpa"); res.exitCode != 0 {
+		t.Fatalf("forced transfer exit = %d, want 0\nstderr:\n%s", res.exitCode, res.stderr)
+	}
+	if got := env.get("test-ucpa").Assignee; got != "thief" {
+		t.Errorf("assignee = %q, want thief", got)
 	}
 }
 
@@ -137,36 +167,64 @@ func TestUpdateClosePolicyBatchCrossesIntoDone(t *testing.T) {
 	}
 }
 
-// TestUpdateClosePolicyBatchGrammarRejectsForce pins the batch update
-// grammar's allowlist. It is the surface that keeps a reserved update-map key
-// from being client-reachable, so it must reject anything it does not name.
-func TestUpdateClosePolicyBatchGrammarRejectsForce(t *testing.T) {
-	// CHARACTERIZATION: force is not part of the grammar.
-	if _, err := parseUpdateKVs([]string{"status=closed", "force=true"}); err == nil {
-		t.Fatal("parseUpdateKVs accepted force=true; the grammar has no override token yet")
+// TestUpdateClosePolicyBatchGrammarForceToken pins the batch update grammar's
+// spelling of the override, and — the part that matters — pins the allowlist
+// that keeps the reserved update-map key from being client-reachable. A script
+// asks for force by the grammar's own token; it can never name the transport
+// key itself, which is what stops the key from becoming a policy bypass.
+func TestUpdateClosePolicyBatchGrammarForceToken(t *testing.T) {
+	updates, err := parseUpdateKVs([]string{"status=closed", "force=true"})
+	if err != nil {
+		t.Fatalf("parseUpdateKVs(force=true): %v", err)
+	}
+	if got := updates[issueops.OpForceClosePolicy]; got != true {
+		t.Errorf("updates[%q] = %v, want true", issueops.OpForceClosePolicy, got)
+	}
+	if updates["status"] != "closed" {
+		t.Errorf("updates[status] = %v, want closed", updates["status"])
+	}
+
+	unforced, err := parseUpdateKVs([]string{"status=closed", "force=false"})
+	if err != nil {
+		t.Fatalf("parseUpdateKVs(force=false): %v", err)
+	}
+	if got := unforced[issueops.OpForceClosePolicy]; got != false {
+		t.Errorf("updates[%q] = %v, want false", issueops.OpForceClosePolicy, got)
+	}
+
+	if _, err := parseUpdateKVs([]string{"force=perhaps"}); err == nil {
+		t.Error("parseUpdateKVs accepted a non-boolean force value")
 	}
 	if _, err := parseUpdateKVs([]string{"_force_close_policy=true"}); err == nil {
-		t.Fatal("parseUpdateKVs accepted a reserved update-map key as a client token")
+		t.Error("parseUpdateKVs accepted the reserved update-map key as a client token")
+	}
+	if _, err := parseUpdateKVs([]string{"description=foo"}); err == nil {
+		t.Error("parseUpdateKVs stopped rejecting keys outside its allowlist")
 	}
 }
 
-// TestUpdateClosePolicyProxiedSpecCarriesNoForce pins the proxied path's
-// translation of `--force`. This is the exact shape of the mapping that was
+// TestUpdateClosePolicyProxiedSpecCarriesForce pins the proxied path's
+// translation of `--force`. This is the exact mapping whose absence was
 // reverted in 11382270b: the proxied caller built a spec that never carried
-// the override, so a shared policy check would refuse it with no way to say
-// otherwise.
-func TestUpdateClosePolicyProxiedSpecCarriesNoForce(t *testing.T) {
+// the override, so a shared policy check refused it with no way to say
+// otherwise. The spec must carry it, and must not invent it.
+func TestUpdateClosePolicyProxiedSpecCarriesForce(t *testing.T) {
 	current := &types.Issue{ID: "test-ucpp", Status: types.StatusOpen}
-	in := &updateInput{fields: map[string]any{"status": string(types.StatusClosed)}, force: true}
 
-	spec := buildUpdateSpecForIssue(current, in)
-
-	// CHARACTERIZATION: --force reaches no further than the reassign fence.
-	// Spelled as a literal because no override key exists yet.
-	if _, ok := spec.Fields["_force_close_policy"]; ok {
-		t.Error("spec.Fields carries a close-policy override; the proxied path has none yet")
+	forced := buildUpdateSpecForIssue(current, &updateInput{
+		fields: map[string]any{"status": string(types.StatusClosed)}, force: true,
+	})
+	if got := forced.Fields[issueops.OpForceClosePolicy]; got != true {
+		t.Errorf("spec.Fields[%q] = %v, want true", issueops.OpForceClosePolicy, got)
 	}
-	if got := spec.Fields["status"]; got != string(types.StatusClosed) {
+	if got := forced.Fields["status"]; got != string(types.StatusClosed) {
 		t.Errorf("spec.Fields[status] = %v, want closed", got)
+	}
+
+	unforced := buildUpdateSpecForIssue(current, &updateInput{
+		fields: map[string]any{"status": string(types.StatusClosed)},
+	})
+	if _, ok := unforced.Fields[issueops.OpForceClosePolicy]; ok {
+		t.Errorf("spec.Fields carries %q without --force", issueops.OpForceClosePolicy)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -475,8 +476,17 @@ func parseUpdateKVs(kvs []string) (map[string]interface{}, error) {
 			updates["title"] = value
 		case "assignee":
 			updates["assignee"] = value
+		case "force":
+			// Not a field: the override for close policy on a status that
+			// crosses into done, spelled as a token because a batch script has
+			// no flags. The write funnel pops it before validating fields.
+			force, err := strconv.ParseBool(value)
+			if err != nil {
+				return nil, fmt.Errorf("update: invalid force %q: %w", value, err)
+			}
+			updates[issueops.OpForceClosePolicy] = force
 		default:
-			return nil, fmt.Errorf("update: unsupported key %q (allowed: status, priority, title, assignee)", key)
+			return nil, fmt.Errorf("update: unsupported key %q (allowed: status, priority, title, assignee, force)", key)
 		}
 	}
 	return updates, nil

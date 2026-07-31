@@ -467,12 +467,18 @@ pointless).`,
 			// Guards ride the operation itself: a stale assignee/status refuses
 			// atomically with a typed mismatch error and MUST surface as a
 			// non-zero exit — never collapse it to success (finding #10).
+			// One --force, two overrides. The assignee half only applies to an
+			// assignee edit — asserting it without one is an invalid request,
+			// which is why it is conditioned here rather than passed straight
+			// through: `--force -s closed` is now a legitimate way to ask for
+			// the close-policy half alone.
 			updateResult, updateErr := ops.Update(opsCtx, issueops.UpdateRequest{
 				Actor:                 actor,
 				IssueID:               result.ResolvedID,
 				Patch:                 patch,
 				Claim:                 claimFlag,
-				ForceAssigneeTransfer: forceFlag,
+				ForceAssigneeTransfer: forceFlag && patch.Assignee.Set,
+				ForceClosePolicy:      forceFlag,
 				ExpectedAssignee:      ifAssignee,
 				ExpectedStatus:        expectedStatus,
 			})
