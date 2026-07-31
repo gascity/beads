@@ -86,7 +86,7 @@ func installRacingOps(t *testing.T) *racingOps {
 		if decorated, ok := target.(storage.DoltStorage); ok {
 			target = storage.UnwrapStore(decorated)
 		}
-		inner, err := beads.NewIssueOperations(target)
+		inner, err := target.IssueLifecycle()
 		if err != nil {
 			return nil, err
 		}

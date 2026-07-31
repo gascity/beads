@@ -173,7 +173,7 @@ func (p *parityStore) RemoveDependency(ctx context.Context, issueID, dependsOnID
 // their completion hook on any success; Reopen fires only when it changed
 // something.
 //
-// A facade is required here because beads.NewIssueOperations never routes
+// A facade is required here because the lifecycle accessor never routes
 // through the DoltStorage methods parityStore decorates — it builds operations
 // straight off the concrete store — so once a verb is rewired, store-level
 // counting goes blind and every "no store mutations" assertion would pass
@@ -257,14 +257,13 @@ func newParityEnv(t *testing.T) *parityEnv {
 	})
 
 	// Count the facade operations the write verbs perform. The real store is
-	// unwrapped first because beads.NewIssueOperations only peels the
-	// decorators it knows (hooks, telemetry) and refuses any other, and
-	// parityStore is deliberately shaped like one.
+	// unwrapped first so the counted lifecycle is the concrete store's,
+	// whatever parityStore's own passthrough happens to promote.
 	newIssueOperations = func(target beads.Storage) (issueops.Lifecycle, error) {
 		if decorated, ok := target.(storage.DoltStorage); ok {
 			target = storage.UnwrapStore(decorated)
 		}
-		inner, err := beads.NewIssueOperations(target)
+		inner, err := target.IssueLifecycle()
 		if err != nil {
 			return nil, err
 		}
