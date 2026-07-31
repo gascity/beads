@@ -171,6 +171,43 @@ func DetermineEventType(oldIssue *types.Issue, updates map[string]interface{}) t
 	return types.EventStatusChanged
 }
 
+// CrossesIntoDoneCategoryInTx reports whether updates move oldStatus from
+// outside the done category into it. The categories are resolved from the same
+// transaction that will perform the write, so a custom status configured as
+// done counts exactly as the built-in closed status does.
+//
+// It is false without a status update, for a value whose Go type cannot carry a
+// status, and for a move that starts in the done category — a done-to-done
+// restatement is not a crossing, and reopening is the operation that leaves.
+func CrossesIntoDoneCategoryInTx(ctx context.Context, tx DBTX, oldStatus types.Status, updates map[string]interface{}) (bool, error) {
+	rawStatus, hasStatus := updates["status"]
+	if !hasStatus {
+		return false, nil
+	}
+	var newStatus types.Status
+	switch value := rawStatus.(type) {
+	case string:
+		newStatus = types.Status(value)
+	case types.Status:
+		newStatus = value
+	default:
+		return false, nil
+	}
+
+	newCategory, err := ReopenCategoryInTx(ctx, tx, newStatus)
+	if err != nil {
+		return false, err
+	}
+	if newCategory != types.CategoryDone {
+		return false, nil
+	}
+	oldCategory, err := ReopenCategoryInTx(ctx, tx, oldStatus)
+	if err != nil {
+		return false, err
+	}
+	return oldCategory != types.CategoryDone, nil
+}
+
 // UpdateResult holds the result of an UpdateIssueInTx call.
 type UpdateResult struct {
 	OldIssue         *types.Issue
