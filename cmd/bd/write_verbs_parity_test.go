@@ -14,7 +14,11 @@
 //	R2  compound bd update         -> one store call (= one hook firing) per
 //	                                  field/label/parent edit, plus phantom
 //	                                  label_added/label_removed events
+//	                                  [FLIPPED to one atomic op by the bd update
+//	                                  rewire]
 //	R3  bd update --parent         -> removes only the FIRST parent edge
+//	                                  [FLIPPED to replace-all by the bd update
+//	                                  rewire]
 //	R4  bd reopen on a non-done,
 //	    non-open status            -> prints "↻ Reopened" and reports success
 //
@@ -1269,18 +1273,17 @@ func TestParityUpdateJSONFailureReport(t *testing.T) {
 	}
 }
 
-// TestParityUpdateCompoundSideEffectSurface pins RULING R2's "today": a single
-// compound `bd update` is NOT one atomic operation. It makes one store call
-// per edit group — the field UPDATE, then each label add/remove — so
-// storage.HookFiringStore fires one on_update hook per call, and no-op label
-// edits still emit phantom label_added/label_removed events.
+// TestParityUpdateCompoundSideEffectSurface pins RULING R2 as adopted: a
+// compound `bd update` is ONE atomic operation, so exactly one on_update hook
+// fires for the whole command instead of one per edit group.
 //
-// Source: cmd/bd/update.go:459-495 (field update), :508-516 (applyLabelUpdates
-// -> cmd/bd/show_unit_helpers.go:78-112), and
-// internal/storage/issueops/labels.go:152-195 (unconditional events).
+// Before the rewire this made one store call per edit group — the field
+// UPDATE, then each label add/remove — firing three hooks for this command.
+// Source of the new behavior: cmd/bd/update.go's single ops.Update call ->
+// internal/storage/issueops/execution.go ExecuteUpdate.
 //
-// RULING R2 will collapse this to ONE store call (one hook) with delta-only
-// label events.
+// The label events themselves are unchanged here because both edits are real
+// deltas; the no-op case is TestParityUpdateNoOpLabelEditIsSilent.
 func TestParityUpdateCompoundSideEffectSurface(t *testing.T) {
 	env := newParityEnv(t)
 	env.seed("test-cmp1", "Compound update", func(i *types.Issue) {
@@ -1300,14 +1303,14 @@ func TestParityUpdateCompoundSideEffectSurface(t *testing.T) {
 		t.Fatalf("exit=%d err=%v stderr=%s", res.exitCode, res.err, res.stderr)
 	}
 
-	// RULING R2: three separate store mutations => three on_update hook firings.
+	// RULING R2: one atomic operation => one on_update hook firing.
 	got := env.store.mutations()
-	want := []string{"UpdateIssue", "AddLabel", "RemoveLabel"}
+	want := []string{"Update"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("store mutation calls = %v, want %v (one hook firing each)", got, want)
+		t.Errorf("operations = %v, want %v (one hook firing)", got, want)
 	}
 
-	// RULING R2: the label edits emit their own events on top of the update.
+	// Real label deltas still emit their own events on top of the update.
 	after := env.eventTypes("test-cmp1")
 	if n := countOf(after, string(types.EventLabelAdded)) - baseAdded; n != 1 {
 		t.Errorf("new label_added events = %d, want 1 (events: %v)", n, after)
@@ -1320,12 +1323,16 @@ func TestParityUpdateCompoundSideEffectSurface(t *testing.T) {
 	}
 }
 
-// TestParityUpdateNoOpLabelEditStillEmitsEvents pins the phantom-event half of
-// RULING R2: adding a label the issue ALREADY has, and removing one it does
-// NOT have, both write events describing changes that never happened.
-// Source: internal/storage/issueops/labels.go:152-195 — the event insert is
-// unconditional.
-func TestParityUpdateNoOpLabelEditStillEmitsEvents(t *testing.T) {
+// TestParityUpdateNoOpLabelEditIsSilent pins the delta-only half of RULING R2
+// as adopted: adding a label the issue ALREADY has, and removing one it does
+// NOT have, write no events at all.
+//
+// Before the rewire both no-ops emitted label_added/label_removed events
+// describing changes that never happened, because the per-label store calls
+// inserted their event unconditionally
+// (internal/storage/issueops/labels.go). The facade diffs the label set first
+// (internal/storage/issueops/aggregate.go ApplyLabelPatch).
+func TestParityUpdateNoOpLabelEditIsSilent(t *testing.T) {
 	env := newParityEnv(t)
 	env.seed("test-cmp2", "No-op labels", nil)
 	if err := env.store.inner.AddLabel(rootCtx, "test-cmp2", "present", "parity-seed"); err != nil {
@@ -1344,22 +1351,32 @@ func TestParityUpdateNoOpLabelEditStillEmitsEvents(t *testing.T) {
 		t.Fatalf("exit=%d err=%v stderr=%s", res.exitCode, res.err, res.stderr)
 	}
 
-	// RULING R2: both no-ops still produce events.
+	// RULING R2: neither no-op produces an event.
 	after := env.eventTypes("test-cmp2")
-	if n := countOf(after, string(types.EventLabelAdded)) - baseAdded; n != 1 {
-		t.Errorf("phantom label_added events = %d, want 1 (re-adding an existing label)", n)
+	if n := countOf(after, string(types.EventLabelAdded)) - baseAdded; n != 0 {
+		t.Errorf("label_added events = %d, want 0 (re-adding an existing label changes nothing)", n)
 	}
-	if n := countOf(after, string(types.EventLabelRemoved)) - baseRemoved; n != 1 {
-		t.Errorf("phantom label_removed events = %d, want 1 (removing an absent label)", n)
+	if n := countOf(after, string(types.EventLabelRemoved)) - baseRemoved; n != 0 {
+		t.Errorf("label_removed events = %d, want 0 (removing an absent label changes nothing)", n)
+	}
+	// The label set itself is untouched.
+	labels, err := env.store.inner.GetLabels(rootCtx, "test-cmp2")
+	if err != nil {
+		t.Fatalf("GetLabels: %v", err)
+	}
+	if strings.Join(labels, ",") != "present" {
+		t.Errorf("labels = %v, want [present]", labels)
 	}
 }
 
-// TestParityUpdateBareClaimFiresNoUpdateHook pins the other R2 asymmetry: a
-// bare `--claim` goes through ClaimIssue, which storage.HookFiringStore does
-// NOT decorate, so no on_update hook fires at all today.
-// Source: cmd/bd/update.go:428-436 and internal/storage/hook_decorator.go
-// (no ClaimIssue override).
-func TestParityUpdateBareClaimFiresNoUpdateHook(t *testing.T) {
+// TestParityUpdateBareClaimFiresUpdateHook pins the last R2 asymmetry as
+// closed: a bare `--claim` is an ordinary update operation, so it fires the
+// on_update hook like every other `bd update`.
+//
+// Before the rewire it went through ClaimIssue, a method
+// storage.HookFiringStore does not decorate, so a claim was the one update
+// that fired no hook at all.
+func TestParityUpdateBareClaimFiresUpdateHook(t *testing.T) {
 	env := newParityEnv(t)
 	env.seed("test-cmp3", "Bare claim", nil)
 
@@ -1369,24 +1386,30 @@ func TestParityUpdateBareClaimFiresNoUpdateHook(t *testing.T) {
 		t.Fatalf("exit=%d err=%v stderr=%s", res.exitCode, res.err, res.stderr)
 	}
 
-	// RULING R2: exactly one store call, and it is ClaimIssue — a method
-	// HookFiringStore leaves undecorated, so zero hooks fire.
+	// RULING R2: one operation, and it fires the update hook.
 	got := env.store.mutations()
-	if strings.Join(got, ",") != "ClaimIssue" {
-		t.Errorf("store mutation calls = %v, want [ClaimIssue]", got)
+	if strings.Join(got, ",") != "Update" {
+		t.Errorf("operations = %v, want [Update] (one hook firing)", got)
 	}
-	if env.get("test-cmp3").Assignee != actor {
-		t.Errorf("assignee = %q, want %q", env.get("test-cmp3").Assignee, actor)
+	claimed := env.get("test-cmp3")
+	if claimed.Assignee != actor {
+		t.Errorf("assignee = %q, want %q", claimed.Assignee, actor)
+	}
+	if claimed.Status != types.StatusInProgress {
+		t.Errorf("status = %q, want in_progress", claimed.Status)
 	}
 }
 
-// TestParityUpdateParentReplacesOnlyFirstEdge pins RULING R3's "today":
-// `bd update --parent` removes only the FIRST parent-child edge it finds and
-// then adds the new one, so a two-parent issue is left with the stale second
-// parent AND the new one. Source: cmd/bd/update.go:546-562 (the `break`).
+// TestParityUpdateParentReplacesAllEdges pins RULING R3 as adopted: `bd update
+// --parent` replaces EVERY existing parent-child edge with the requested one,
+// atomically, in the same operation as the rest of the update.
 //
-// RULING R3 will make this an atomic replace-all.
-func TestParityUpdateParentReplacesOnlyFirstEdge(t *testing.T) {
+// Before the rewire it removed only the FIRST parent-child edge it found and
+// then added the new one across three separate transactions, leaving a
+// two-parent issue with a stale parent AND the new one — a silently corrupted
+// hierarchy. Source of the new behavior:
+// internal/storage/issueops/aggregate.go ApplyParentPatch.
+func TestParityUpdateParentReplacesAllEdges(t *testing.T) {
 	env := newParityEnv(t)
 	env.seed("test-par1", "Parent one", nil)
 	env.seed("test-par2", "Parent two", nil)
@@ -1418,35 +1441,17 @@ func TestParityUpdateParentReplacesOnlyFirstEdge(t *testing.T) {
 		}
 	}
 
-	// RULING R3: today exactly one old edge is dropped, leaving TWO parents.
-	if len(parents) != 2 {
-		t.Fatalf("parent edges after reparent = %v, want 2 (today only the first old edge is removed)", parents)
-	}
-	hasNew := false
-	for _, p := range parents {
-		if p == "test-par3" {
-			hasNew = true
-		}
-	}
-	if !hasNew {
-		t.Errorf("parent edges = %v; the new parent must be present", parents)
-	}
-	// RULING R3: and the surviving stale parent is one of the originals.
-	stale := 0
-	for _, p := range parents {
-		if p == "test-par1" || p == "test-par2" {
-			stale++
-		}
-	}
-	if stale != 1 {
-		t.Errorf("stale parent edges = %d, want 1 (today's remove-only-the-first bug)", stale)
+	// RULING R3: both old edges are gone; the requested parent is the only one.
+	if strings.Join(parents, ",") != "test-par3" {
+		t.Errorf("parent edges after reparent = %v, want [test-par3] (replace-all)", parents)
 	}
 
-	// RULING R2/R3: the reparent runs as separate store calls, not one op.
+	// RULING R2/R3: the reparent rides the same single operation as the rest
+	// of the update, so it is one hook firing, not two store calls.
 	got := env.store.mutations()
-	want := []string{"RemoveDependency", "AddDependency"}
+	want := []string{"Update"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("store mutation calls = %v, want %v", got, want)
+		t.Errorf("operations = %v, want %v (one hook firing)", got, want)
 	}
 }
 

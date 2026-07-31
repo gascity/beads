@@ -21,6 +21,14 @@ func NewIssueOperations(store *EmbeddedDoltStore) (issueops.Operations, error) {
 
 type issueOperations struct{ store *EmbeddedDoltStore }
 
+// updateCommitMessage names the updated issue in the Dolt commit message.
+func updateCommitMessage(issueID string) string {
+	if issueID == "" {
+		return "bd: update issue"
+	}
+	return "bd: update " + issueID
+}
+
 func (o *issueOperations) Create(ctx context.Context, request issueops.CreateRequest) (issueops.CreateResult, error) {
 	snapshot := storageissueops.CloneCreateRequest(request)
 	var result issueops.CreateResult
@@ -36,7 +44,9 @@ func (o *issueOperations) Create(ctx context.Context, request issueops.CreateReq
 func (o *issueOperations) Update(ctx context.Context, request issueops.UpdateRequest) (issueops.UpdateResult, error) {
 	snapshot := storageissueops.CloneUpdateRequest(request)
 	var result issueops.UpdateResult
-	err := o.store.runIssueOperationTx(ctx, "bd: update issue", func(tx *sql.Tx) (storageissueops.ChangedTables, error) {
+	// Same ID-bearing commit message as the server-backed store, so `bd dolt
+	// log` reads the same on both backends.
+	err := o.store.runIssueOperationTx(ctx, updateCommitMessage(snapshot.IssueID), func(tx *sql.Tx) (storageissueops.ChangedTables, error) {
 		var err error
 		var tables storageissueops.ChangedTables
 		result, tables, err = storageissueops.ExecuteUpdate(ctx, tx, snapshot)

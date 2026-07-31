@@ -20,6 +20,14 @@ func NewIssueOperations(store *DoltStore) (issueops.Operations, error) {
 
 type issueOperations struct{ store *DoltStore }
 
+// updateCommitMessage names the updated issue in the Dolt commit message.
+func updateCommitMessage(issueID string) string {
+	if issueID == "" {
+		return "bd: update issue"
+	}
+	return "bd: update " + issueID
+}
+
 func (o *issueOperations) Create(ctx context.Context, request issueops.CreateRequest) (issueops.CreateResult, error) {
 	snapshot := storageissueops.CloneCreateRequest(request)
 	var result issueops.CreateResult
@@ -36,7 +44,10 @@ func (o *issueOperations) Update(ctx context.Context, request issueops.UpdateReq
 	snapshot := storageissueops.CloneUpdateRequest(request)
 	var result issueops.UpdateResult
 	err := o.verifiedUpdate(ctx, snapshot, func() error {
-		return o.store.runIssueOperationTx(ctx, "bd: update issue", func(tx *sql.Tx) (storageissueops.ChangedTables, error) {
+		// The message names the issue because that is the one `bd dolt log`
+		// affordance callers actually grep, and it is what the CLI's own
+		// per-command commit wrote before updates moved onto this path.
+		return o.store.runIssueOperationTx(ctx, updateCommitMessage(snapshot.IssueID), func(tx *sql.Tx) (storageissueops.ChangedTables, error) {
 			var err error
 			var tables storageissueops.ChangedTables
 			result, tables, err = storageissueops.ExecuteUpdate(ctx, tx, snapshot)
