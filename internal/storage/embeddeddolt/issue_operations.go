@@ -11,6 +11,11 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
+// IssueLifecycle returns the guarded issue-lifecycle surface for this store.
+func (s *EmbeddedDoltStore) IssueLifecycle() (issueops.Lifecycle, error) {
+	return NewIssueOperations(s)
+}
+
 // NewIssueOperations returns guarded issue operations backed by store.
 func NewIssueOperations(store *EmbeddedDoltStore) (issueops.Lifecycle, error) {
 	if store == nil {

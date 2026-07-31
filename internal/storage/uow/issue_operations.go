@@ -22,6 +22,13 @@ type issueOperations struct {
 	provider UnitOfWorkProvider
 }
 
+// IssueLifecycle returns the guarded issue-lifecycle surface for this
+// provider. A unit of work is not a special case: callers reach the verbs
+// through the same accessor they use on a store.
+func (p *doltSQLProvider) IssueLifecycle() (publicops.Lifecycle, error) {
+	return NewIssueOperations(p)
+}
+
 // NewIssueOperations constructs public issue operations backed by provider.
 func NewIssueOperations(provider UnitOfWorkProvider) (publicops.Lifecycle, error) {
 	if isNilUnitOfWorkProvider(provider) {

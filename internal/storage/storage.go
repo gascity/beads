@@ -80,6 +80,16 @@ type CommentPageCursor struct {
 // implementations; such additions are called out in CHANGELOG.md and the
 // examples/library-usage guide so implementers have a migration path.
 type Storage interface {
+	// IssueLifecycle returns the guarded issue-lifecycle surface for this
+	// store. Every decorator in a store's chain answers for itself and layers
+	// its own behavior onto the inner result, so the returned Lifecycle carries
+	// the same hook and telemetry layers the store itself carries.
+	//
+	// A capability the lifecycle role does not cover gets its own role
+	// interface and its own accessor here; it does not get appended to
+	// issueops.Lifecycle.
+	IssueLifecycle() (issueops.Lifecycle, error)
+
 	// Issue CRUD
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error
 	CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error

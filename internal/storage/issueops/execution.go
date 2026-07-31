@@ -3,7 +3,6 @@ package issueops
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -57,7 +56,7 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor); err != nil {
 		return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
 	}
-	issue.Dependencies = CreatePublicCreateDependencies(issue.ID, attempt)
+	issue.Dependencies = storage.CreatePublicCreateDependencies(issue.ID, attempt)
 	var skipped []skippedDependency
 	created, err := CreateIssuesInTxWithResult(ctx, tx, []*types.Issue{issue}, attempt.Actor, storage.BatchCreateOptions{
 		CreateOnly: true, OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: attempt.ForceIDPrefix,
@@ -277,29 +276,4 @@ func ExecuteReopen(ctx context.Context, tx *sql.Tx, request publicops.ReopenRequ
 		return publicops.ReopenResult{}, nil, err
 	}
 	return publicops.ReopenResult{Issue: hydrated, Changed: reopened.Changed}, tables, nil
-}
-
-// CreatePublicCreateDependencies returns the dependency snapshot described by
-// a public create request after its issue ID is known.
-func CreatePublicCreateDependencies(issueID string, request publicops.CreateRequest) []*types.Dependency {
-	dependencies := make([]*types.Dependency, 0, len(request.Dependencies)+2)
-	if request.ParentID != "" {
-		dependencies = append(dependencies, &types.Dependency{IssueID: issueID, DependsOnID: request.ParentID, Type: types.DepParentChild})
-	}
-	if request.WaitsFor != nil {
-		gate := request.WaitsFor.Gate
-		if gate == "" {
-			gate = types.WaitsForAllChildren
-		}
-		metadata, _ := json.Marshal(types.WaitsForMeta{Gate: gate})
-		dependencies = append(dependencies, &types.Dependency{IssueID: issueID, DependsOnID: request.WaitsFor.SpawnerID, Type: types.DepWaitsFor, Metadata: string(metadata)})
-	}
-	for _, dependency := range request.Dependencies {
-		source, target := issueID, dependency.TargetID
-		if dependency.Reverse {
-			source, target = target, issueID
-		}
-		dependencies = append(dependencies, &types.Dependency{IssueID: source, DependsOnID: target, Type: dependency.Type, Metadata: dependency.Metadata, ThreadID: dependency.ThreadID})
-	}
-	return dependencies
 }

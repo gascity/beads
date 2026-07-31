@@ -6,6 +6,17 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
+// IssueLifecycle returns the inner store's lifecycle wrapped in this layer's
+// instrumentation. It recurses instead of delegating: a blind delegation would
+// return the inner lifecycle unspanned and untimed.
+func (s *InstrumentedStorage) IssueLifecycle() (issueops.Lifecycle, error) {
+	inner, err := s.Unwrap().IssueLifecycle()
+	if err != nil {
+		return nil, err
+	}
+	return s.WrapIssueOperations(inner), nil
+}
+
 // WrapIssueOperations instruments guarded public issue operations with this
 // storage layer's existing telemetry meter and tracer.
 func (s *InstrumentedStorage) WrapIssueOperations(inner issueops.Lifecycle) issueops.Lifecycle {

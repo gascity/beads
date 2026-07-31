@@ -98,7 +98,7 @@ func (o *hookIssueOperations) Create(ctx context.Context, request issueops.Creat
 	snapshot := storageissueops.CloneCreateRequest(request)
 	result, err := o.inner.Create(ctx, snapshot)
 	if err == nil && result.Issue != nil {
-		o.hooks.CompleteIssueOperationCreate(ctx, result.Issue, storageissueops.CreatePublicCreateDependencies(result.Issue.ID, snapshot))
+		o.hooks.CompleteIssueOperationCreate(ctx, result.Issue, storage.CreatePublicCreateDependencies(result.Issue.ID, snapshot))
 	}
 	return result, err
 }
