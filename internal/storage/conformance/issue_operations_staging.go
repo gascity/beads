@@ -13,7 +13,7 @@ import (
 // needs; an adapter supplies only those.
 type IssueOperationsStagingFixture struct {
 	IssuePrefix   string
-	Operations    publicops.Operations
+	Operations    publicops.Lifecycle
 	CreateIssue   func(context.Context, *types.Issue, string) error
 	AddDependency func(context.Context, *types.Dependency, string) error
 	GetReadyWork  func(context.Context, types.WorkFilter) ([]*types.Issue, error)

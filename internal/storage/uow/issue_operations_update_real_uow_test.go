@@ -421,13 +421,13 @@ func readIssueMutationSnapshot(t *testing.T, ctx context.Context, provider UnitO
 	return snapshot
 }
 
-func newRealIssueOperations(t *testing.T, ctx context.Context) issueops.Operations {
+func newRealIssueOperations(t *testing.T, ctx context.Context) issueops.Lifecycle {
 	t.Helper()
 	operations, _ := newRealIssueOperationsWithProvider(t, ctx)
 	return operations
 }
 
-func newRealIssueOperationsWithProvider(t *testing.T, ctx context.Context) (issueops.Operations, UnitOfWorkProvider) {
+func newRealIssueOperationsWithProvider(t *testing.T, ctx context.Context) (issueops.Lifecycle, UnitOfWorkProvider) {
 	t.Helper()
 	provider := newTestUOWProvider(t)
 	if err := RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {

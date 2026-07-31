@@ -141,12 +141,12 @@ func TestHookIssueOperationsForwardsEveryVerbExactlyOnceAndPreservesErrors(t *te
 	ctx := context.Background()
 	for _, test := range []struct {
 		name string
-		call func(issueops.Operations) error
+		call func(issueops.Lifecycle) error
 	}{
-		{"create", func(ops issueops.Operations) error { _, err := ops.Create(ctx, issueops.CreateRequest{}); return err }},
-		{"update", func(ops issueops.Operations) error { _, err := ops.Update(ctx, issueops.UpdateRequest{}); return err }},
-		{"close", func(ops issueops.Operations) error { _, err := ops.Close(ctx, issueops.CloseRequest{}); return err }},
-		{"reopen", func(ops issueops.Operations) error { _, err := ops.Reopen(ctx, issueops.ReopenRequest{}); return err }},
+		{"create", func(ops issueops.Lifecycle) error { _, err := ops.Create(ctx, issueops.CreateRequest{}); return err }},
+		{"update", func(ops issueops.Lifecycle) error { _, err := ops.Update(ctx, issueops.UpdateRequest{}); return err }},
+		{"close", func(ops issueops.Lifecycle) error { _, err := ops.Close(ctx, issueops.CloseRequest{}); return err }},
+		{"reopen", func(ops issueops.Lifecycle) error { _, err := ops.Reopen(ctx, issueops.ReopenRequest{}); return err }},
 	} {
 		t.Run(test.name+" success", func(t *testing.T) {
 			fake := &fakeIssueOperations{changed: true}
@@ -169,7 +169,7 @@ func TestHookIssueOperationsFiresCompletionHooksPerVerbRules(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		fake    *fakeIssueOperations
-		call    func(issueops.Operations) error
+		call    func(issueops.Lifecycle) error
 		wantErr bool
 		want    []string
 	}{
@@ -179,19 +179,19 @@ func TestHookIssueOperationsFiresCompletionHooksPerVerbRules(t *testing.T) {
 			// reopen changed nothing.
 			name: "reopen no-op fires nothing",
 			fake: &fakeIssueOperations{changed: false},
-			call: func(ops issueops.Operations) error { _, err := ops.Reopen(ctx, issueops.ReopenRequest{}); return err },
+			call: func(ops issueops.Lifecycle) error { _, err := ops.Reopen(ctx, issueops.ReopenRequest{}); return err },
 			want: nil,
 		},
 		{
 			name: "reopen change fires update",
 			fake: &fakeIssueOperations{changed: true},
-			call: func(ops issueops.Operations) error { _, err := ops.Reopen(ctx, issueops.ReopenRequest{}); return err },
+			call: func(ops issueops.Lifecycle) error { _, err := ops.Reopen(ctx, issueops.ReopenRequest{}); return err },
 			want: []string{"update"},
 		},
 		{
 			name:    "reopen error fires nothing",
 			fake:    &fakeIssueOperations{changed: true, err: errors.New("underlying")},
-			call:    func(ops issueops.Operations) error { _, err := ops.Reopen(ctx, issueops.ReopenRequest{}); return err },
+			call:    func(ops issueops.Lifecycle) error { _, err := ops.Reopen(ctx, issueops.ReopenRequest{}); return err },
 			wantErr: true,
 			want:    nil,
 		},
@@ -201,7 +201,7 @@ func TestHookIssueOperationsFiresCompletionHooksPerVerbRules(t *testing.T) {
 			// Do not "unify" this with reopen's gating.
 			name: "update no-op still fires update",
 			fake: &fakeIssueOperations{changed: false},
-			call: func(ops issueops.Operations) error { _, err := ops.Update(ctx, issueops.UpdateRequest{}); return err },
+			call: func(ops issueops.Lifecycle) error { _, err := ops.Update(ctx, issueops.UpdateRequest{}); return err },
 			want: []string{"update"},
 		},
 		{
@@ -210,7 +210,7 @@ func TestHookIssueOperationsFiresCompletionHooksPerVerbRules(t *testing.T) {
 			// (internal/storage/hook_decorator.go). Do not "unify" this either.
 			name: "close no-op still fires close",
 			fake: &fakeIssueOperations{changed: false},
-			call: func(ops issueops.Operations) error { _, err := ops.Close(ctx, issueops.CloseRequest{}); return err },
+			call: func(ops issueops.Lifecycle) error { _, err := ops.Close(ctx, issueops.CloseRequest{}); return err },
 			want: []string{"close"},
 		},
 	} {

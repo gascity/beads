@@ -179,7 +179,7 @@ func (p *parityStore) RemoveDependency(ctx context.Context, issueID, dependsOnID
 // counting goes blind and every "no store mutations" assertion would pass
 // vacuously.
 type parityOps struct {
-	inner issueops.Operations
+	inner issueops.Lifecycle
 	store *parityStore
 }
 
@@ -260,7 +260,7 @@ func newParityEnv(t *testing.T) *parityEnv {
 	// unwrapped first because beads.NewIssueOperations only peels the
 	// decorators it knows (hooks, telemetry) and refuses any other, and
 	// parityStore is deliberately shaped like one.
-	newIssueOperations = func(target beads.Storage) (issueops.Operations, error) {
+	newIssueOperations = func(target beads.Storage) (issueops.Lifecycle, error) {
 		if decorated, ok := target.(storage.DoltStorage); ok {
 			target = storage.UnwrapStore(decorated)
 		}

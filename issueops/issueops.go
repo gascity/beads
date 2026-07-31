@@ -284,9 +284,11 @@ type ReopenResult struct {
 	Changed bool
 }
 
-// Operations describes guarded issue mutations. Deterministic request
-// validation failures match ErrValidation; when a more-specific validation
-// sentinel applies, it remains matchable too. Implementations never mutate
+// Lifecycle describes guarded issue mutations. A new capability gets a new
+// role interface and its own accessor; never append a method here.
+// Deterministic request validation failures match ErrValidation; when a
+// more-specific validation sentinel applies, it remains matchable too.
+// Implementations never mutate
 // caller-owned request values. Callers must not concurrently mutate
 // request-owned mutable values until the call returns; snapshotting does not
 // make Go data races safe. Implementations snapshot all request inputs once at
@@ -297,7 +299,7 @@ type ReopenResult struct {
 // Refusals and deterministic validation failures leave persistent state
 // unchanged. Other operational or commit-finalization errors can have an
 // indeterminate durable outcome; callers must reread state before retrying.
-type Operations interface {
+type Lifecycle interface {
 	// Create validates and commits the complete request as one atomic mutation.
 	// It is create-only across issues and wisps: an occupied ID returns
 	// ErrAlreadyExists and leaves persistent state unchanged. A refusal or

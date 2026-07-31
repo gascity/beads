@@ -12,7 +12,7 @@ import (
 )
 
 // NewIssueOperations returns guarded issue operations backed by store.
-func NewIssueOperations(store *EmbeddedDoltStore) (issueops.Operations, error) {
+func NewIssueOperations(store *EmbeddedDoltStore) (issueops.Lifecycle, error) {
 	if store == nil {
 		return nil, &storage.ErrUnsupported{Op: "NewIssueOperations", Backend: "nil"}
 	}
@@ -79,4 +79,4 @@ func (o *issueOperations) Reopen(ctx context.Context, request issueops.ReopenReq
 	return result, err
 }
 
-var _ issueops.Operations = (*issueOperations)(nil)
+var _ issueops.Lifecycle = (*issueOperations)(nil)

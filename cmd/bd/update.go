@@ -762,7 +762,7 @@ func parseSetMetadataFlags(flags []string) (map[string]json.RawMessage, error) {
 // step left behind (fenceVersion), which fails the transition instead of
 // applying it. The unguarded spelling is deliberately left unpinned: it never
 // had a check to be atomic with, and pinning it would invent a failure mode.
-func applyUpdateWithLifecycle(ctx context.Context, ops issueops.Operations, request issueops.UpdateRequest, hasNonStatusEdit bool, session string) (*types.Issue, error) {
+func applyUpdateWithLifecycle(ctx context.Context, ops issueops.Lifecycle, request issueops.UpdateRequest, hasNonStatusEdit bool, session string) (*types.Issue, error) {
 	result, err := ops.Update(ctx, request)
 	var boundary *storageissueops.ClosedBoundaryError
 	if err == nil || !errors.As(err, &boundary) || !request.Patch.Status.Set {

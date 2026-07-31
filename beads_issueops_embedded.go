@@ -10,7 +10,7 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
-func newEmbeddedIssueOperations(store any) (issueops.Operations, error) {
+func newEmbeddedIssueOperations(store any) (issueops.Lifecycle, error) {
 	if backend, ok := store.(*embeddeddolt.EmbeddedDoltStore); ok {
 		return embeddeddolt.NewIssueOperations(backend)
 	}

@@ -20,6 +20,6 @@ var newIssueOperations = beads.NewIssueOperations
 // inherits whatever decorator stack its store carries. Building it over the
 // store that owns the issue is what keeps a routed write hookless and a local
 // write hooked, exactly as the direct store calls did.
-func writeOps(st storage.DoltStorage) (issueops.Operations, error) {
+func writeOps(st storage.DoltStorage) (issueops.Lifecycle, error) {
 	return newIssueOperations(st)
 }

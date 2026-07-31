@@ -8,13 +8,13 @@ import (
 
 // WrapIssueOperations instruments guarded public issue operations with this
 // storage layer's existing telemetry meter and tracer.
-func (s *InstrumentedStorage) WrapIssueOperations(inner issueops.Operations) issueops.Operations {
+func (s *InstrumentedStorage) WrapIssueOperations(inner issueops.Lifecycle) issueops.Lifecycle {
 	return &instrumentedIssueOperations{storage: s, inner: inner}
 }
 
 type instrumentedIssueOperations struct {
 	storage *InstrumentedStorage
-	inner   issueops.Operations
+	inner   issueops.Lifecycle
 }
 
 func (o *instrumentedIssueOperations) Create(ctx context.Context, request issueops.CreateRequest) (result issueops.CreateResult, err error) {

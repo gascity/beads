@@ -99,7 +99,7 @@ func TestIssueOperationsMetadataPatchRejectsInvalidInputWithRealDolt(t *testing.
 	}
 }
 
-func newMetadataPatchOperations(t *testing.T, ctx context.Context) issueops.Operations {
+func newMetadataPatchOperations(t *testing.T, ctx context.Context) issueops.Lifecycle {
 	t.Helper()
 	provider := newTestUOWProvider(t)
 	if err := RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
@@ -117,7 +117,7 @@ func newMetadataPatchOperations(t *testing.T, ctx context.Context) issueops.Oper
 	return operations
 }
 
-func createMetadataPatchIssue(t *testing.T, ctx context.Context, operations issueops.Operations, id string) string {
+func createMetadataPatchIssue(t *testing.T, ctx context.Context, operations issueops.Lifecycle, id string) string {
 	t.Helper()
 	created, err := operations.Create(ctx, issueops.CreateRequest{Actor: "tester", Issue: &issueops.Issue{
 		ID: id, Title: id, IssueType: types.TypeTask, Priority: 2, Metadata: json.RawMessage(`{"keep":"yes","remove":"gone","overlap":"old","stable":true}`),
@@ -128,7 +128,7 @@ func createMetadataPatchIssue(t *testing.T, ctx context.Context, operations issu
 	return created.Issue.ID
 }
 
-func readMetadataPatchIssue(t *testing.T, ctx context.Context, operations issueops.Operations, id string) *issueops.Issue {
+func readMetadataPatchIssue(t *testing.T, ctx context.Context, operations issueops.Lifecycle, id string) *issueops.Issue {
 	t.Helper()
 	issue, err := operations.Update(ctx, issueops.UpdateRequest{Actor: "tester", IssueID: id})
 	if err != nil {

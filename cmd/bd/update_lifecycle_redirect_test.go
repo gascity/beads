@@ -28,7 +28,7 @@ import (
 // request, which is what makes "did the close carry the guard's version?"
 // observable without a second process.
 type racingOps struct {
-	inner issueops.Operations
+	inner issueops.Lifecycle
 
 	// afterUpdate runs once, after the first successful Update, before control
 	// returns to the redirect. It stands in for the concurrent writer.
@@ -82,7 +82,7 @@ func (o *racingOps) Reopen(ctx context.Context, request issueops.ReopenRequest) 
 func installRacingOps(t *testing.T) *racingOps {
 	t.Helper()
 	ops := &racingOps{}
-	newIssueOperations = func(target beads.Storage) (issueops.Operations, error) {
+	newIssueOperations = func(target beads.Storage) (issueops.Lifecycle, error) {
 		if decorated, ok := target.(storage.DoltStorage); ok {
 			target = storage.UnwrapStore(decorated)
 		}

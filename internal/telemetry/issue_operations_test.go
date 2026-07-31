@@ -35,21 +35,21 @@ func TestInstrumentedIssueOperationsForwardsEveryAttemptOnce(t *testing.T) {
 	base := WrapStorage(&fakeDoltStore{}).(*InstrumentedStorage)
 	for _, test := range []struct {
 		name string
-		call func(issueops.Operations) error
+		call func(issueops.Lifecycle) error
 	}{
-		{"create", func(o issueops.Operations) error {
+		{"create", func(o issueops.Lifecycle) error {
 			_, e := o.Create(context.Background(), issueops.CreateRequest{})
 			return e
 		}},
-		{"update", func(o issueops.Operations) error {
+		{"update", func(o issueops.Lifecycle) error {
 			_, e := o.Update(context.Background(), issueops.UpdateRequest{})
 			return e
 		}},
-		{"close", func(o issueops.Operations) error {
+		{"close", func(o issueops.Lifecycle) error {
 			_, e := o.Close(context.Background(), issueops.CloseRequest{})
 			return e
 		}},
-		{"reopen", func(o issueops.Operations) error {
+		{"reopen", func(o issueops.Lifecycle) error {
 			_, e := o.Reopen(context.Background(), issueops.ReopenRequest{})
 			return e
 		}},

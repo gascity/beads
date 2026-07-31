@@ -13,7 +13,7 @@ import (
 )
 
 func TestPublicDeclarationsHaveUsefulZeroValues(t *testing.T) {
-	var _ issueops.Operations = operationsProbe{}
+	var _ issueops.Lifecycle = operationsProbe{}
 	var create issueops.CreateRequest
 	var update issueops.UpdateRequest
 	var closeRequest issueops.CloseRequest

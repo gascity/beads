@@ -23,7 +23,7 @@ type issueOperations struct {
 }
 
 // NewIssueOperations constructs public issue operations backed by provider.
-func NewIssueOperations(provider UnitOfWorkProvider) (publicops.Operations, error) {
+func NewIssueOperations(provider UnitOfWorkProvider) (publicops.Lifecycle, error) {
 	if isNilUnitOfWorkProvider(provider) {
 		return nil, fmt.Errorf("new issue operations: unit-of-work provider must not be nil")
 	}
@@ -43,7 +43,7 @@ func isNilUnitOfWorkProvider(provider UnitOfWorkProvider) bool {
 	}
 }
 
-var _ publicops.Operations = (*issueOperations)(nil)
+var _ publicops.Lifecycle = (*issueOperations)(nil)
 
 // Create creates one issue in a retried unit-of-work transaction.
 func (o *issueOperations) Create(ctx context.Context, request publicops.CreateRequest) (publicops.CreateResult, error) {

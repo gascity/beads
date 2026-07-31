@@ -16,7 +16,7 @@ import (
 type ErrUnsupported = storage.ErrUnsupported
 
 // NewIssueOperations returns the guarded issue-mutation surface for store.
-func NewIssueOperations(store Storage) (issueops.Operations, error) {
+func NewIssueOperations(store Storage) (issueops.Lifecycle, error) {
 	if isNilIssueOperationsStore(store) {
 		return nil, &storage.ErrUnsupported{Op: "NewIssueOperations", Backend: "nil"}
 	}
@@ -60,7 +60,7 @@ type issueOperationsLayer struct {
 	telemetry *telemetry.InstrumentedStorage
 }
 
-func applyIssueOperationsLayers(operations issueops.Operations, layers []issueOperationsLayer) issueops.Operations {
+func applyIssueOperationsLayers(operations issueops.Lifecycle, layers []issueOperationsLayer) issueops.Lifecycle {
 	for index := len(layers) - 1; index >= 0; index-- {
 		layer := layers[index]
 		if layer.hooks != nil {
@@ -72,7 +72,7 @@ func applyIssueOperationsLayers(operations issueops.Operations, layers []issueOp
 	return operations
 }
 
-func unsupportedIssueOperationsBackend(store any) (issueops.Operations, error) {
+func unsupportedIssueOperationsBackend(store any) (issueops.Lifecycle, error) {
 	return nil, &storage.ErrUnsupported{Op: "NewIssueOperations", Backend: reflect.TypeOf(store).String()}
 }
 
@@ -90,7 +90,7 @@ type issueOperationHooks interface {
 var _ issueOperationHooks = (*storage.HookFiringStore)(nil)
 
 type hookIssueOperations struct {
-	inner issueops.Operations
+	inner issueops.Lifecycle
 	hooks issueOperationHooks
 }
 

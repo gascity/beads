@@ -13,7 +13,7 @@ import (
 )
 
 // This file holds the behavior contract every implementation of
-// publicops.Operations must satisfy, independent of how it reaches storage.
+// publicops.Lifecycle must satisfy, independent of how it reaches storage.
 // There are three of them — the direct store, the embedded store, and the
 // unit-of-work backend — and the first two share an execution path the third
 // does not. Behavior asserted only against one backend has repeatedly drifted
