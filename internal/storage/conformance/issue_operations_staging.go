@@ -9,13 +9,15 @@ import (
 )
 
 // IssueOperationsStagingFixture supplies adapter-specific storage access for
-// selective-staging assertions.
+// the issue-operations assertions. Each Run function documents which fields it
+// needs; an adapter supplies only those.
 type IssueOperationsStagingFixture struct {
 	IssuePrefix   string
 	Operations    publicops.Operations
 	CreateIssue   func(context.Context, *types.Issue, string) error
 	AddDependency func(context.Context, *types.Dependency, string) error
 	GetReadyWork  func(context.Context, types.WorkFilter) ([]*types.Issue, error)
+	SetConfig     func(context.Context, string, string) error
 	Commit        func(context.Context, string) error
 	Exec          func(context.Context, string, ...any) error
 	QueryScalar   func(context.Context, string, []any, ...any) error
