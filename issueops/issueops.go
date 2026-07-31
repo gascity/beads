@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -323,34 +321,7 @@ type Operations interface {
 	Reopen(context.Context, ReopenRequest) (ReopenResult, error)
 }
 
-// Public errors preserve the canonical storage and model sentinel identities.
-var (
-	ErrNotFound          = storage.ErrNotFound
-	ErrValidation        = storage.ErrValidation
-	ErrNotInitialized    = storage.ErrNotInitialized
-	ErrFieldTooLong      = types.ErrFieldTooLong
-	ErrAlreadyClaimed    = storage.ErrAlreadyClaimed
-	ErrNotClaimable      = storage.ErrNotClaimable
-	ErrCloseBlocked      = storage.ErrCloseBlocked
-	ErrCloseOpenChildren = storage.ErrCloseOpenChildren
-	ErrClosedBoundary    = storage.ErrClosedBoundary
-	ErrAlreadyExists     = storage.ErrAlreadyExists
-	ErrPrefixMismatch    = storage.ErrPrefixMismatch
-	ErrVersionMismatch   = storage.ErrVersionMismatch
-	ErrAssigneeMismatch  = storage.ErrAssigneeMismatch
-	ErrStatusMismatch    = storage.ErrStatusMismatch
-	ErrSelfDependency    = domain.ErrSelfDependency
-	ErrDependencyCycle   = domain.ErrDependencyCycle
-)
-
-// CloseOpenChildrenError reports the issue and open-child count that refused an
-// unforced close.
-type CloseOpenChildrenError = storage.CloseOpenChildrenError
-
-// DependencyTypeConflictError reports a duplicate dependency pair with a
-// conflicting requested type.
-type DependencyTypeConflictError = domain.DependencyTypeConflictError
-
-// DependencyHierarchyConflictError reports a dependency that would make a
-// blocking hierarchy impossible to complete.
-type DependencyHierarchyConflictError = domain.DependencyHierarchyConflictError
+// ErrFieldTooLong preserves the canonical model sentinel identity for a value
+// that exceeds its field's maximum length. The rest of the operation error
+// vocabulary is declared in errors.go.
+var ErrFieldTooLong = types.ErrFieldTooLong

@@ -10,31 +10,40 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
-// ErrAlreadyClaimed is returned when attempting to claim an issue that is already
-// claimed by another user. The error message contains the current assignee.
-var ErrAlreadyClaimed = errors.New("issue already claimed")
+// The guarded issue-operation error vocabulary is declared and documented by
+// the public contract package, github.com/steveyegge/beads/issueops. These are
+// the same values, so every storage.ErrX reference and every errors.Is site
+// keeps matching the identical error.
+var (
+	ErrAlreadyClaimed    = issueops.ErrAlreadyClaimed
+	ErrNotClaimable      = issueops.ErrNotClaimable
+	ErrAssigneeMismatch  = issueops.ErrAssigneeMismatch
+	ErrNotFound          = issueops.ErrNotFound
+	ErrValidation        = issueops.ErrValidation
+	ErrNotInitialized    = issueops.ErrNotInitialized
+	ErrPrefixMismatch    = issueops.ErrPrefixMismatch
+	ErrCloseBlocked      = issueops.ErrCloseBlocked
+	ErrCloseOpenChildren = issueops.ErrCloseOpenChildren
+	ErrClosedBoundary    = issueops.ErrClosedBoundary
+	ErrAlreadyExists     = issueops.ErrAlreadyExists
+	ErrVersionMismatch   = issueops.ErrVersionMismatch
+	ErrStatusMismatch    = issueops.ErrStatusMismatch
+)
 
-// ErrNotClaimable is returned when attempting to claim an issue that is not in a
-// claimable state, such as closed, deferred, or already in progress without the
-// same actor owning the claim.
-var ErrNotClaimable = errors.New("issue not claimable")
+// CloseOpenChildrenError reports the issue and open-child count that refused a
+// guarded close. See issueops.CloseOpenChildrenError.
+type CloseOpenChildrenError = issueops.CloseOpenChildrenError
 
 // ErrNotOwner is returned when an actor tries to unclaim an issue that is claimed
 // by a different actor. Releasing another actor's claim requires the force
 // escape hatch (bd unclaim --force), reserved for admin/reaper use.
 var ErrNotOwner = errors.New("issue claimed by a different actor")
-
-// ErrAssigneeMismatch is returned by UnclaimIssueIfAssignee when the issue's
-// current assignee does not match the expected assignee (including when the
-// issue is no longer assigned at all). The caller's view of the claim was
-// stale; the issue is left untouched.
-var ErrAssigneeMismatch = errors.New("assignee mismatch")
 
 // ClaimedByFragment and NotClaimableStatusFragment are the exact message
 // fragments the claim path (issueops/claim.go) appends after the sentinel to
@@ -48,65 +57,6 @@ const (
 	ClaimedByFragment          = " by "
 	NotClaimableStatusFragment = ": status "
 )
-
-// ErrNotFound is returned when a requested entity does not exist in the database.
-var ErrNotFound = errors.New("not found")
-
-// ErrValidation classifies deterministic request-validation failures.
-var ErrValidation = errors.New("validation failed")
-
-// ErrNotInitialized is returned when the database has not been initialized
-// (e.g., issue_prefix config is missing).
-var ErrNotInitialized = errors.New("database not initialized")
-
-// ErrPrefixMismatch is returned when an issue ID does not match the configured prefix.
-var ErrPrefixMismatch = errors.New("prefix mismatch")
-
-// ErrCloseBlocked is returned by CloseIssueChecked when an issue cannot be
-// closed because it is still blocked (is_blocked=1: an open blocking dependency
-// or an open blocking gate). Bypass with CloseIssueOptions.Force.
-var ErrCloseBlocked = errors.New("cannot close blocked issue")
-
-// ErrCloseOpenChildren is returned when an unforced close finds open
-// parent-child dependents.
-var ErrCloseOpenChildren = errors.New("cannot close issue with open children")
-
-// CloseOpenChildrenError reports the issue and open-child count that refused a
-// guarded close.
-type CloseOpenChildrenError struct {
-	IssueID      string
-	OpenChildren int
-}
-
-func (e *CloseOpenChildrenError) Error() string {
-	return fmt.Sprintf("cannot close %s: %d open child issue(s); close children first or use --force to override", e.IssueID, e.OpenChildren)
-}
-
-// Unwrap makes CloseOpenChildrenError match ErrCloseOpenChildren.
-func (e *CloseOpenChildrenError) Unwrap() error {
-	return ErrCloseOpenChildren
-}
-
-// ErrClosedBoundary is returned when a generic update attempts to move an
-// issue across its configured done/non-done status category boundary. Callers
-// must use the lifecycle operation to cross the done boundary.
-var ErrClosedBoundary = errors.New("cannot move issue across done boundary")
-
-// ErrAlreadyExists is returned when a create operation is given an ID that is
-// already occupied. The issue and wisp tables share one ID space.
-var ErrAlreadyExists = errors.New("issue already exists")
-
-// ErrVersionMismatch is returned by a *Checked op given an ExpectedVersion that
-// no longer matches the row's current version (row_lock) — an optimistic
-// concurrency failure. Callers errors.Is it to distinguish a lost-update
-// precondition from other errors.
-var ErrVersionMismatch = errors.New("version mismatch")
-
-// ErrStatusMismatch is returned by UpdateIssueChecked given an ExpectedStatus
-// that no longer matches the issue's current status. The caller's view of the
-// issue was stale; the issue is left untouched. The assignee analog is
-// ErrAssigneeMismatch, shared with UnclaimIssueIfAssignee.
-var ErrStatusMismatch = errors.New("status mismatch")
 
 // CommentPageCursor is the resume position for a keyset page of an issue's
 // comments: the (created_at, id) of the last comment already returned. The zero
