@@ -118,14 +118,20 @@ func TestReopenWispStagesOnlyConcreteIssueChanges(t *testing.T) {
 		if !blocked {
 			t.Fatal("recomputed durable issue is not visible AS OF HEAD")
 		}
-		var committedEvent int
+		// events is dolt_ignored since migration 0062 (bd-red8u), so it has no
+		// HEAD state of its own: the sentinel row cannot ride the issues commit,
+		// but it must survive that commit in the working set. The plane
+		// invariant — no events row ever reaches committed history — is what
+		// assertEventsNotCommitted still checks here, where HEAD does advance.
+		var workingEvent int
 		if err := store.db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE id = ?", eventID).Scan(&committedEvent); err != nil {
-			t.Fatalf("read dirty event AS OF HEAD: %v", err)
+			"SELECT COUNT(*) FROM events WHERE id = ?", eventID).Scan(&workingEvent); err != nil {
+			t.Fatalf("read dirty event in working set: %v", err)
 		}
-		if committedEvent != 0 {
-			t.Fatal("wisp reopen swept an unrelated dirty event into its issues commit")
+		if workingEvent != 1 {
+			t.Fatalf("dirty working-set event count = %d, want 1 (the issues commit dropped it)", workingEvent)
 		}
+		assertEventsNotCommitted(ctx, t, store.db)
 	})
 }
 
@@ -159,13 +165,17 @@ func assertReopenDirtyRowsUncommitted(
 	if headNotes == "uncommitted reopen sentinel" {
 		t.Fatal("isolated wisp reopen staged an unrelated dirty issue")
 	}
-	var committedEvent int
+	// events is dolt_ignored since migration 0062 (bd-red8u): there is no HEAD
+	// state to read. Both callers already assert that HEAD did not move at all,
+	// which covers "nothing was published"; what is left to check about the
+	// sentinel event is that the reopen did not destroy it in the working set.
+	var workingEvent int
 	if err := store.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE id = ?", eventID).Scan(&committedEvent); err != nil {
-		t.Fatalf("read dirty event AS OF HEAD: %v", err)
+		"SELECT COUNT(*) FROM events WHERE id = ?", eventID).Scan(&workingEvent); err != nil {
+		t.Fatalf("read dirty event in working set: %v", err)
 	}
-	if committedEvent != 0 {
-		t.Fatal("isolated wisp reopen staged an unrelated dirty event")
+	if workingEvent != 1 {
+		t.Fatalf("dirty working-set event count = %d, want 1 (the reopen dropped it)", workingEvent)
 	}
 }
 

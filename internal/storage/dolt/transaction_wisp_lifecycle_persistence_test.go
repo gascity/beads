@@ -226,29 +226,31 @@ func TestRunInIssueLifecycleTransactionStandaloneWispMutationDoesNotPublishUnrel
 		t.Errorf("durable issue titles = working:%q HEAD:%q", workingTitle, headTitle)
 	}
 
-	for _, check := range []struct {
-		name  string
-		query string
-		args  []any
-	}{
-		{
-			name:  "event",
-			query: "SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ? AND comment = ?",
-			args:  []any{durableID, string(types.EventCreated), "durable working-only"},
-		},
-		{
-			name:  "label",
-			query: "SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = ? AND label = ?",
-			args:  []any{durableID, workingLabel},
-		},
-	} {
-		var count int
-		if err := store.db.QueryRowContext(ctx, check.query, check.args...).Scan(&count); err != nil {
-			t.Fatalf("read durable %s AS OF HEAD: %v", check.name, err)
-		}
-		if count != 0 {
-			t.Errorf("durable working-only %s count AS OF HEAD = %d, want 0", check.name, count)
-		}
+	var headLabelCount int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = ? AND label = ?",
+		durableID, workingLabel,
+	).Scan(&headLabelCount); err != nil {
+		t.Fatalf("read durable label AS OF HEAD: %v", err)
+	}
+	if headLabelCount != 0 {
+		t.Errorf("durable working-only label count AS OF HEAD = %d, want 0", headLabelCount)
+	}
+
+	// events is dolt_ignored since migration 0062 (bd-red8u): it has no HEAD
+	// state, so the working-only audit edit can only be read from the working
+	// set. "Nothing was published" is already carried by the HEAD-unchanged
+	// assertion above; what remains to check is that the wisp mutation left the
+	// unrelated audit edit intact.
+	var workingEventCount int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ? AND comment = ?",
+		durableID, string(types.EventCreated), "durable working-only",
+	).Scan(&workingEventCount); err != nil {
+		t.Fatalf("read durable event in working set: %v", err)
+	}
+	if workingEventCount != 1 {
+		t.Errorf("durable working-only event count = %d, want 1", workingEventCount)
 	}
 }
 
@@ -264,21 +266,20 @@ func assertDirectSameStatusUnrelatedChangesWorkingOnly(t *testing.T, ctx context
 	if workingTitle != "working-only title" || headTitle != "perm "+dirtyID {
 		t.Errorf("unrelated issue titles = working:%q HEAD:%q", workingTitle, headTitle)
 	}
-	var workingEvent, headEvent int
+	// events is dolt_ignored since migration 0062 (bd-red8u): there is no HEAD
+	// state to compare against. Every caller of this helper asserts that HEAD
+	// did not move, which is the stronger form of "nothing was published"; the
+	// remaining events-specific claim is that the same-status update left the
+	// unrelated working-set audit edit alone.
+	var workingEvent int
 	if err := store.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ? AND comment = ?",
 		dirtyID, string(types.EventCreated), "working-only event",
 	).Scan(&workingEvent); err != nil {
 		t.Fatalf("read working unrelated event: %v", err)
 	}
-	if err := store.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ? AND comment = ?",
-		dirtyID, string(types.EventCreated), "working-only event",
-	).Scan(&headEvent); err != nil {
-		t.Fatalf("read unrelated event AS OF HEAD: %v", err)
-	}
-	if workingEvent != 1 || headEvent != 0 {
-		t.Errorf("unrelated event edit counts = working:%d HEAD:%d", workingEvent, headEvent)
+	if workingEvent != 1 {
+		t.Errorf("unrelated working-set event edit count = %d, want 1", workingEvent)
 	}
 }
 

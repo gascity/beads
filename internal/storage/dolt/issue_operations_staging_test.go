@@ -263,10 +263,15 @@ func TestIssueOperationsReopenWispStagesOnlyConcreteDurableChanges(t *testing.T)
 		if err := store.db.QueryRowContext(ctx, "SELECT is_blocked FROM issues AS OF 'HEAD' WHERE id = ?", "ops-staging-reopen-depender").Scan(&blocked); err != nil || !blocked {
 			t.Fatalf("committed durable recompute = %t, %v", blocked, err)
 		}
+		// events is dolt_ignored since migration 0062 (bd-red8u): the unrelated
+		// audit row has no HEAD state and cannot ride the issues commit, but it
+		// must survive it in the working set. assertEventsNotCommitted keeps the
+		// plane invariant pinned here, where the recompute does advance HEAD.
 		var events int
-		if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE id = ?", "ops-staging-reopen-flip-event").Scan(&events); err != nil || events != 0 {
-			t.Fatalf("unrelated event committed = %d, %v", events, err)
+		if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE id = ?", "ops-staging-reopen-flip-event").Scan(&events); err != nil || events != 1 {
+			t.Fatalf("unrelated working-set event = %d, %v", events, err)
 		}
+		assertEventsNotCommitted(ctx, t, store.db)
 	})
 }
 

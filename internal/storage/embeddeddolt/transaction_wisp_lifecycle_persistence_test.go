@@ -218,15 +218,19 @@ func TestEmbeddedTransactionSameStatusDoesNotPublishUnrelatedDurableChanges(t *t
 	if workingTitle != "working-only title" || headTitle != "dirty baseline" {
 		t.Errorf("unrelated issue titles = working:%q HEAD:%q", workingTitle, headTitle)
 	}
-	var workingEvent, headEvent int
+	// events is dolt_ignored since migration 0062 (bd-red8u). On the
+	// production-shaped database this harness builds, the table is absent from
+	// committed history entirely, so an AS OF 'HEAD' probe errors rather than
+	// proving anything; the plane contract itself is pinned by
+	// TestEmbeddedMigration0062FlipsEventsToIgnoredPlane. "Nothing was
+	// published" is already carried by the HEAD-unchanged assertion above, so
+	// what is left is that the unrelated audit edit survives in the working set.
+	var workingEvent int
 	te.queryScalar(t, ctx,
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ? AND comment = ?",
 		[]any{dirtyID, string(types.EventCreated), "working-only event"}, &workingEvent)
-	te.queryScalar(t, ctx,
-		"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ? AND comment = ?",
-		[]any{dirtyID, string(types.EventCreated), "working-only event"}, &headEvent)
-	if workingEvent != 1 || headEvent != 0 {
-		t.Errorf("unrelated event edit counts = working:%d HEAD:%d", workingEvent, headEvent)
+	if workingEvent != 1 {
+		t.Errorf("unrelated working-set event edit count = %d, want 1", workingEvent)
 	}
 }
 
@@ -339,15 +343,17 @@ func TestEmbeddedTransactionStandaloneWispMutationDoesNotPublishUnrelatedDurable
 		t.Errorf("durable issue titles = working:%q HEAD:%q", workingTitle, headTitle)
 	}
 
-	var workingEvent, headEvent int
+	// events is dolt_ignored since migration 0062 (bd-red8u) and has no HEAD
+	// state on this production-shaped database (see the same-status test above
+	// and TestEmbeddedMigration0062FlipsEventsToIgnoredPlane). Publication is
+	// covered by the HEAD-unchanged assertion; the durable label check below
+	// still exercises a versioned side table at HEAD.
+	var workingEvent int
 	te.queryScalar(t, ctx,
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ? AND comment = ?",
 		[]any{durableID, string(types.EventCreated), "durable working-only"}, &workingEvent)
-	te.queryScalar(t, ctx,
-		"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ? AND comment = ?",
-		[]any{durableID, string(types.EventCreated), "durable working-only"}, &headEvent)
-	if workingEvent != 1 || headEvent != 0 {
-		t.Errorf("durable event edit counts = working:%d HEAD:%d", workingEvent, headEvent)
+	if workingEvent != 1 {
+		t.Errorf("durable working-set event edit count = %d, want 1", workingEvent)
 	}
 
 	var workingLabelCount, headLabelCount int
