@@ -10,6 +10,7 @@
 // already been adjudicated and WILL change during the rewire:
 //
 //	R1  bd create --id <occupied>  -> silent full-row upsert reporting success
+//	                                  [FLIPPED to a refusal by the bd create rewire]
 //	R2  compound bd update         -> one store call (= one hook firing) per
 //	                                  field/label/parent edit, plus phantom
 //	                                  label_added/label_removed events
@@ -808,17 +809,17 @@ func TestParityCreateWithDepsOmitsDependenciesKey(t *testing.T) {
 	}
 }
 
-// TestParityCreateOnOccupiedIDSilentlyUpserts pins RULING R1's "today":
-// `bd create --id <occupied>` overwrites the existing row wholesale, reports
-// success (exit 0, "✓ Created issue:"), and records no distinct creation
-// event. This is silent data loss.
+// TestParityCreateOnOccupiedIDRefuses pins RULING R1 as adopted: `bd create
+// --id <occupied>` refuses. The facade's create-only guard returns
+// storage.ErrAlreadyExists, the CLI maps it to exit 1 with a fixed message
+// naming the alternatives, and the pre-existing row is left untouched.
 //
-// Source: cmd/bd/create.go:567 -> storage CreateIssue ->
-// internal/storage/issueops/helpers.go:92-99 (INSERT ... ON DUPLICATE KEY
-// UPDATE).
-//
-// RULING R1 will flip this to storage.ErrAlreadyExists + exit 1.
-func TestParityCreateOnOccupiedIDSilentlyUpserts(t *testing.T) {
+// Before the rewire this was a full-row silent upsert that reported success
+// (exit 0, "✓ Created issue:") while destroying the existing issue and
+// recording no creation event — silent data loss. Source of the new behavior:
+// cmd/bd/create.go's ops.Create call ->
+// internal/storage/issueops/create_only_guard.go.
+func TestParityCreateOnOccupiedIDRefuses(t *testing.T) {
 	env := newParityEnv(t)
 	env.seed("test-occ1", "Original title", func(i *types.Issue) {
 		i.Description = "original description"
@@ -832,24 +833,31 @@ func TestParityCreateOnOccupiedIDSilentlyUpserts(t *testing.T) {
 	})
 	res := env.run(createCmd, "Replacement title")
 
-	// RULING R1: today this SUCCEEDS.
-	if res.exitCode != 0 {
-		t.Fatalf("expected today's silent-upsert success, got exit=%d err=%v stderr=%s", res.exitCode, res.err, res.stderr)
+	// RULING R1: the occupied ID is refused.
+	if res.exitCode != 1 {
+		t.Fatalf("exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", res.exitCode, res.stdout, res.stderr)
 	}
-	if !strings.HasPrefix(res.stdout, "✓ Created issue: ") {
-		t.Errorf("stdout = %q; today an occupied --id still reports \"✓ Created issue:\"", res.stdout)
+	const wantErr = "Error: test-occ1 already exists; use bd update, or bd import for upsert semantics\n"
+	if res.stderr != wantErr {
+		t.Errorf("stderr = %q, want %q", res.stderr, wantErr)
+	}
+	if res.stdout != "" {
+		t.Errorf("stdout = %q, want empty on a refused create", res.stdout)
 	}
 
-	// RULING R1: and the pre-existing row is destroyed.
+	// RULING R1: and the pre-existing row survives intact.
 	after := env.get("test-occ1")
-	if after.Title != "Replacement title" {
-		t.Errorf("title = %q, want the overwriting create's title", after.Title)
+	if after.Title != "Original title" {
+		t.Errorf("title = %q, want the seeded title", after.Title)
 	}
-	if after.Description != "replacement description" {
-		t.Errorf("description = %q, want the overwriting create's description", after.Description)
+	if after.Description != "original description" {
+		t.Errorf("description = %q, want the seeded description", after.Description)
 	}
-	if after.Priority != 4 {
-		t.Errorf("priority = %d, want 4", after.Priority)
+	if after.Priority != 0 {
+		t.Errorf("priority = %d, want 0", after.Priority)
+	}
+	if got := env.lastTouched(); got != "" {
+		t.Errorf("last-touched = %q, want it untouched on a refused create", got)
 	}
 }
 
