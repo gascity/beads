@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
@@ -126,6 +127,15 @@ func ClassifyPublicCreateError(err error) error {
 	}
 	if errors.Is(err, storage.ErrPrefixMismatch) || errors.Is(err, domain.ErrSelfDependency) || errors.Is(err, types.ErrFieldTooLong) || errors.Is(err, domain.ErrDependencyCycle) || errors.As(err, &conflict) || errors.As(err, &hierarchyConflict) {
 		return publicCreateValidationError(err)
+	}
+	// A create whose requested relationship names a row that does not exist
+	// fails the dependency table's target foreign key. The caller asked for an
+	// edge to something absent, so this is a deterministic refusal rather than
+	// an infrastructure error: classify it the same way ExecuteCreate refuses a
+	// skipped dependency, so every backend reports a missing dependency,
+	// parent, or waits-for target as ErrValidation wrapping ErrNotFound.
+	if dberrors.IsMissingForeignKeyTarget(err) {
+		return publicCreateValidationError(fmt.Errorf("create: dependency target does not exist: %w: %w", err, storage.ErrNotFound))
 	}
 	return err
 }
