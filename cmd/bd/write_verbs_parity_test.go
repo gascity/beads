@@ -232,6 +232,9 @@ type parityEnv struct {
 // stdout mid-assertion. It does NOT suppress the "✓ Created issue:" lines:
 // those go through debug.PrintNormal, which reads the debug package's own
 // quiet flag (set by main.go's PersistentPreRun, which RunE-level tests skip).
+// parityOwnerEmail pins the git identity create derives its owner field from.
+const parityOwnerEmail = "parity-owner@test"
+
 func newParityEnv(t *testing.T) *parityEnv {
 	t.Helper()
 
@@ -276,6 +279,11 @@ func newParityEnv(t *testing.T) *parityEnv {
 	readonlyMode = false
 
 	t.Setenv("NO_COLOR", "1")
+	// getOwner reads GIT_AUTHOR_EMAIL, then falls back to git config user.email, so
+	// create's owner field — and therefore its --json key set — otherwise varies with
+	// the ambient git identity. Pin it: CI commonly sets GIT_AUTHOR_EMAIL, a developer
+	// shell usually does not, and the suite must render the same verdict in both.
+	t.Setenv("GIT_AUTHOR_EMAIL", parityOwnerEmail)
 	t.Setenv("BEADS_DIR", beadsDir)
 
 	// Pin every config key the write verbs read. config.Initialize() merges
@@ -639,8 +647,11 @@ func TestParityCreateJSONShape(t *testing.T) {
 	assertKeySet(t, obj, []string{
 		"id", "title", "description", "status", "priority", "issue_type",
 		"assignee", "created_at", "created_by", "updated_at", "labels",
-		"schema_version",
+		"owner", "schema_version",
 	})
+	if obj["owner"] != parityOwnerEmail {
+		t.Errorf("owner = %v, want %q from the git identity", obj["owner"], parityOwnerEmail)
+	}
 	if _, ok := obj["dependencies"]; ok {
 		t.Error("create --json emitted a `dependencies` key; today it prints a local struct that has none")
 	}
