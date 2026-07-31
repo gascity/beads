@@ -58,11 +58,6 @@ func (e *CloseOpenChildrenError) Unwrap() error {
 	return ErrCloseOpenChildren
 }
 
-// ErrClosedBoundary is returned when a generic update attempts to move an
-// issue across its configured done/non-done status category boundary. Callers
-// must use the lifecycle operation to cross the done boundary.
-var ErrClosedBoundary = errors.New("cannot move issue across done boundary")
-
 // ErrAlreadyExists is returned when a create operation is given an ID that is
 // already occupied. The issue and wisp tables share one ID space.
 var ErrAlreadyExists = errors.New("issue already exists")

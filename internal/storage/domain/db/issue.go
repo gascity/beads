@@ -134,7 +134,6 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 
 	table := pickIssueTable(opts.UseWispsTable)
 
-	_, statusChanging := updates["status"]
 	mergeOps := issueops.HasMergeOps(updates)
 
 	// Read the prior row once. Status and merge updates need it for their
@@ -166,20 +165,6 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		updates = resolved
 	}
 
-	doneToDone := false
-	if statusChanging {
-		next, allowedDoneToDone, err := issueops.GuardClosedBoundaryInTx(ctx, r.runner, oldIssue.Status, updates["status"])
-		if err != nil {
-			return fmt.Errorf("db: Update %s: %w", id, err)
-		}
-		if next == oldIssue.Status {
-			delete(updates, "status")
-			statusChanging = false
-		} else {
-			updates["status"] = next
-			doneToDone = allowedDoneToDone
-		}
-	}
 	filteredUpdates, err := issueops.DiscardNoopIssueUpdates(oldIssue, updates)
 	if err != nil {
 		return fmt.Errorf("db: Update %s: compare updates: %w", id, err)
@@ -188,6 +173,9 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	if len(updates) == 0 {
 		return nil
 	}
+	// A status that matched the row was already dropped as a no-op, so the
+	// lifecycle side effects below only fire on a real transition.
+	_, statusChanging := updates["status"]
 
 	setClauses := make([]string, 0, len(updates)+3)
 	args := make([]any, 0, len(updates)+4)
@@ -205,9 +193,11 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	setClauses = append(setClauses, "updated_at = ?")
 	args = append(args, time.Now().UTC())
 
-	// Auto-manage started_at from the status transition unless the caller set it
+	// Lifecycle parity with issueops.updateIssueInTx: auto-manage closed_at and
+	// started_at from the status transition unless the caller set them
 	// explicitly.
 	if statusChanging {
+		setClauses, args = issueops.ManageClosedAt(oldIssue, updates, setClauses, args)
 		setClauses, args = issueops.ManageStartedAt(oldIssue, updates, setClauses, args)
 	}
 	clearLease := issueops.ManageLeaseOnUpdate(oldIssue, updates)
@@ -243,9 +233,12 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		}
 	}
 
+	// Event-type parity: embedded records EventClosed / EventReopened /
+	// EventStatusChanged for status transitions (issueops.DetermineEventType),
+	// EventUpdated otherwise.
 	eventType := types.EventUpdated
 	if statusChanging {
-		eventType = types.EventStatusChanged
+		eventType = issueops.DetermineEventType(oldIssue, updates)
 	}
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID: id,
@@ -259,7 +252,7 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		newStatus := coerceStatus(updates["status"])
 		oldActive := oldIssue.Status != types.StatusClosed && oldIssue.Status != types.StatusPinned
 		newActive := newStatus != types.StatusClosed && newStatus != types.StatusPinned
-		if !doneToDone && oldActive != newActive {
+		if oldActive != newActive {
 			var (
 				affectedIssues, affectedWisps []string
 				aerr                          error

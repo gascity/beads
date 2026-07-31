@@ -38,9 +38,8 @@ func (h *reopenTestHelper) closeIssue(issueID, reason string) {
 }
 
 func (h *reopenTestHelper) reopenIssue(issueID string) {
-	// Crossing the done boundary requires the lifecycle operation; a generic
-	// status update is refused with storage.ErrClosedBoundary. This mirrors
-	// closeIssue above, which has always used the lifecycle call.
+	// Reopen through the lifecycle operation so the fixture carries the full
+	// closure teardown, mirroring closeIssue above.
 	if err := h.s.ReopenIssue(h.ctx, issueID, "", "test-user"); err != nil {
 		h.t.Fatalf("Failed to reopen issue: %v", err)
 	}

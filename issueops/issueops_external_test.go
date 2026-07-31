@@ -165,15 +165,11 @@ func TestPublicErrorsKeepCanonicalIdentity(t *testing.T) {
 		"prefix mismatch":   issueops.ErrPrefixMismatch,
 		"assignee mismatch": issueops.ErrAssigneeMismatch,
 		"status mismatch":   issueops.ErrStatusMismatch,
-		"done boundary":     issueops.ErrClosedBoundary,
 		"already exists":    issueops.ErrAlreadyExists,
 	} {
 		if err == nil {
 			t.Errorf("%s sentinel is nil", name)
 		}
-	}
-	if got := issueops.ErrClosedBoundary.Error(); !strings.Contains(got, "done boundary") || strings.Contains(got, "closed boundary") {
-		t.Errorf("ErrClosedBoundary = %q, want done-boundary terminology", got)
 	}
 
 	classified := errors.Join(issueops.ErrValidation, issueops.ErrPrefixMismatch)

@@ -31,6 +31,36 @@ func IsAllowedUpdateField(key string) bool {
 	return allowed[key]
 }
 
+// ManageClosedAt auto-sets closed_at when closing or clears it when reopening.
+func ManageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setClauses []string, args []interface{}) ([]string, []interface{}) {
+	statusVal, hasStatus := updates["status"]
+	_, hasExplicitClosedAt := updates["closed_at"]
+	if hasExplicitClosedAt || !hasStatus {
+		return setClauses, args
+	}
+
+	var newStatus string
+	switch v := statusVal.(type) {
+	case string:
+		newStatus = v
+	case types.Status:
+		newStatus = string(v)
+	default:
+		return setClauses, args
+	}
+
+	if newStatus == string(types.StatusClosed) {
+		now := time.Now().UTC()
+		setClauses = append(setClauses, "closed_at = ?")
+		args = append(args, now)
+	} else if oldIssue.Status == types.StatusClosed {
+		setClauses = append(setClauses, "closed_at = ?", "close_reason = ?")
+		args = append(args, nil, "")
+	}
+
+	return setClauses, args
+}
+
 // ManageStartedAt auto-sets started_at when transitioning to in_progress.
 // If the issue already has a started_at, it is preserved (not overwritten).
 func ManageStartedAt(oldIssue *types.Issue, updates map[string]interface{}, setClauses []string, args []interface{}) ([]string, []interface{}) {
@@ -115,6 +145,32 @@ func ManageLeaseOnUpdate(oldIssue *types.Issue, updates map[string]interface{}) 
 	return !sameClaim
 }
 
+// DetermineEventType returns the appropriate event type for an update.
+func DetermineEventType(oldIssue *types.Issue, updates map[string]interface{}) types.EventType {
+	statusVal, hasStatus := updates["status"]
+	if !hasStatus {
+		return types.EventUpdated
+	}
+
+	var newStatus string
+	switch v := statusVal.(type) {
+	case string:
+		newStatus = v
+	case types.Status:
+		newStatus = string(v)
+	default:
+		return types.EventUpdated
+	}
+
+	if newStatus == string(types.StatusClosed) {
+		return types.EventClosed
+	}
+	if oldIssue.Status == types.StatusClosed {
+		return types.EventReopened
+	}
+	return types.EventStatusChanged
+}
+
 // UpdateResult holds the result of an UpdateIssueInTx call.
 type UpdateResult struct {
 	OldIssue         *types.Issue
@@ -160,19 +216,6 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	oldIssue, updates, err := readIssueAndResolveMergeOps(ctx, tx, id, updates)
 	if err != nil {
 		return nil, err
-	}
-	var doneToDone bool
-	if requested, hasStatus := updates["status"]; hasStatus {
-		next, allowedDoneToDone, err := GuardClosedBoundaryInTx(ctx, tx, oldIssue.Status, requested)
-		if err != nil {
-			return nil, err
-		}
-		if next == oldIssue.Status {
-			delete(updates, "status")
-		} else {
-			updates["status"] = next
-			doneToDone = allowedDoneToDone
-		}
 	}
 	updates, err = DiscardNoopIssueUpdates(oldIssue, updates)
 	if err != nil {
@@ -233,6 +276,9 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 		}
 	}
 
+	// Auto-manage closed_at (set on close, clear on reopen).
+	setClauses, args = ManageClosedAt(oldIssue, updates, setClauses, args)
+
 	// Auto-manage started_at (set on transition to in_progress). (GH#2796)
 	setClauses, args = ManageStartedAt(oldIssue, updates, setClauses, args)
 
@@ -265,10 +311,7 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	if recordEvent {
 		oldData, _ := json.Marshal(oldIssue)
 		newData, _ := json.Marshal(updates)
-		eventType := types.EventUpdated
-		if _, hasStatus := updates["status"]; hasStatus {
-			eventType = types.EventStatusChanged
-		}
+		eventType := DetermineEventType(oldIssue, updates)
 
 		if err := RecordFullEventInTable(ctx, tx, eventTable, id, eventType, actor, string(oldData), string(newData)); err != nil {
 			return nil, fmt.Errorf("failed to record event: %w", err)
@@ -285,7 +328,7 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 		}
 		oldActive := oldIssue.Status != types.StatusClosed && oldIssue.Status != types.StatusPinned
 		newActive := newStatus != string(types.StatusClosed) && newStatus != string(types.StatusPinned)
-		if !doneToDone && oldActive != newActive {
+		if oldActive != newActive {
 			var affectedIssues, affectedWisps []string
 			var aerr error
 			if isWisp {

@@ -15,7 +15,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -557,9 +556,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	return stats, nil
 }
 
-// applyPullIssueUpdate keeps a pulled update atomic with its labels. Ordinary
-// updates remain generic; a refused done-boundary transition is replayed via
-// the dedicated lifecycle operation.
+// applyPullIssueUpdate keeps a pulled update atomic with its labels.
 func applyPullIssueUpdate(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, labels []string, actor string) error {
 	if err := applyPullIssueFields(ctx, tx, id, updates, actor); err != nil {
 		return err
@@ -570,84 +567,7 @@ func applyPullIssueUpdate(ctx context.Context, tx storage.IssueLifecycleTransact
 // applyPullIssueFields applies a pulled issue's fields while preserving the
 // caller's control over related collections such as labels.
 func applyPullIssueFields(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, actor string) error {
-	if err := tx.UpdateIssue(ctx, id, updates, actor); err != nil {
-		if !errors.Is(err, storage.ErrClosedBoundary) {
-			return err
-		}
-		if err := applyPullBoundaryUpdate(ctx, tx, id, updates, actor, err); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func applyPullBoundaryUpdate(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, actor string, boundaryErr error) error {
-	var boundary *issueops.ClosedBoundaryError
-	if !errors.As(boundaryErr, &boundary) {
-		return fmt.Errorf("%w: missing lifecycle direction", storage.ErrClosedBoundary)
-	}
-	current, err := tx.GetIssue(ctx, id)
-	if err != nil {
-		return err
-	}
-	targetValue, ok := updates["status"]
-	if !ok {
-		return storage.ErrClosedBoundary
-	}
-	target := types.Status(fmt.Sprint(targetValue))
-	if current == nil || boundary.From() != current.Status || boundary.To() != target || boundary.EntersDone() == boundary.LeavesDone() {
-		return fmt.Errorf("%w: invalid lifecycle direction", storage.ErrClosedBoundary)
-	}
-	nonStatus := make(map[string]interface{}, len(updates)-1)
-	for key, value := range updates {
-		if key != "status" {
-			nonStatus[key] = value
-		}
-	}
-	if len(nonStatus) > 0 {
-		if err := tx.UpdateIssue(ctx, current.ID, nonStatus, actor); err != nil {
-			return err
-		}
-	}
-	if boundary.EntersDone() {
-		if err := tx.CloseIssue(ctx, current.ID, "", actor, ""); err != nil {
-			return err
-		}
-	} else {
-		changed, err := tx.ReopenIssueWithResult(ctx, current.ID, "", actor)
-		if err != nil {
-			return err
-		}
-		if !changed {
-			return fmt.Errorf("%w: reopen reported no lifecycle change", storage.ErrClosedBoundary)
-		}
-	}
-	if target != types.StatusClosed && target != types.StatusOpen {
-		if err := tx.UpdateIssue(ctx, current.ID, map[string]interface{}{"status": target}, actor); err != nil {
-			return err
-		}
-	}
-	updated, err := tx.GetIssue(ctx, current.ID)
-	if err != nil {
-		return err
-	}
-	if updated == nil || updated.Status != target {
-		return fmt.Errorf("%w: lifecycle update ended at status %q instead of %q", storage.ErrClosedBoundary, statusOf(updated), target)
-	}
-	if boundary.EntersDone() && updated.ClosedAt == nil {
-		return fmt.Errorf("%w: lifecycle update entered done without closed_at", storage.ErrClosedBoundary)
-	}
-	if boundary.LeavesDone() && updated.ClosedAt != nil {
-		return fmt.Errorf("%w: lifecycle update left done with closed_at still set", storage.ErrClosedBoundary)
-	}
-	return nil
-}
-
-func statusOf(issue *types.Issue) types.Status {
-	if issue == nil {
-		return ""
-	}
-	return issue.Status
+	return tx.UpdateIssue(ctx, id, updates, actor)
 }
 
 func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {

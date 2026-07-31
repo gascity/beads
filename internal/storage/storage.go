@@ -30,7 +30,6 @@ var (
 	ErrPrefixMismatch    = issueops.ErrPrefixMismatch
 	ErrCloseBlocked      = issueops.ErrCloseBlocked
 	ErrCloseOpenChildren = issueops.ErrCloseOpenChildren
-	ErrClosedBoundary    = issueops.ErrClosedBoundary
 	ErrAlreadyExists     = issueops.ErrAlreadyExists
 	ErrVersionMismatch   = issueops.ErrVersionMismatch
 	ErrStatusMismatch    = issueops.ErrStatusMismatch

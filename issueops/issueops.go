@@ -94,10 +94,9 @@ type IssuePatch struct {
 	AppendNotes Field[string]
 	SpecID      Field[string]
 	AwaitID     Field[string]
-	// Status sets a status within its configured done/non-done category. A
-	// generic Update cannot move an issue across the configured done/non-done
-	// category boundary: it refuses the whole operation with ErrClosedBoundary;
-	// use Close or Reopen for lifecycle transitions.
+	// Status sets the issue's status, including across the configured
+	// done/non-done category boundary. Close and Reopen remain the operations
+	// that carry the full lifecycle policy.
 	Status           Field[Status]
 	Priority         Field[int]
 	IssueType        Field[IssueType]

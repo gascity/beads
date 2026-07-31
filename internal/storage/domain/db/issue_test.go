@@ -31,8 +31,6 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("NormalizesStatusType", s.issueUpdateStatusType)
 		s.Run("NormalizesTimestampToUTC", s.issueUpdateNormalizesTimestamp)
 		s.Run("MissingIDWithStatusChangeReturnsErrNoRows", s.issueUpdateMissingIDWithStatus)
-		s.Run("ClosedBoundary", s.issueUpdateClosedBoundary)
-		s.Run("CustomDoneToDone", s.issueUpdateCustomDoneToDone)
 		s.Run("SameStatusInUnitOfWork", s.issueUpdateSameStatusInUnitOfWork)
 		s.Run("PreservesCallerMap", s.issueUpdatePreservesCallerMap)
 	})
