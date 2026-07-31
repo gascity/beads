@@ -21,11 +21,14 @@
 //	                                  rewire]
 //	R4  bd reopen on a non-done,
 //	    non-open status            -> prints "↻ Reopened" and reports success
+//	                                  [FLIPPED to "nothing to do" by the bd
+//	                                  reopen rewire]
 //
 // Assertions covering those four are tagged `RULING Rn`. When a rewire commit
 // flips one, the assertion is updated IN THAT COMMIT with a comment naming the
 // ruling. Any OTHER assertion in this file changing is a regression, not a
-// refactor.
+// refactor. All four have now landed; every remaining assertion is unchanged
+// from the pre-rewire CLI and must stay that way.
 //
 // Harness: the commands' RunE functions are invoked in-process against a real
 // storage.DoltStorage, with stdout/stderr captured and the returned error
@@ -1802,16 +1805,19 @@ func TestParityReopenErrorExits1Silently(t *testing.T) {
 	}
 }
 
-// TestParityReopenNonDoneStatusReportsSuccess pins RULING R4's "today":
-// reopening an in_progress issue is a no-op in the engine
-// (internal/storage/issueops/reopen.go:48-50 returns Changed=false for a
-// non-done category), yet cmd/bd/reopen.go:64-83 still calls ReopenIssue —
-// so a hook fires — prints "↻ Reopened", and exits 0. The status is unchanged,
-// making the success report a lie.
+// TestParityReopenNonDoneStatusReportsNothingToDo pins RULING R4 as adopted:
+// reopening an issue whose status is neither done nor open reports that there
+// was nothing to do and fires no hook.
 //
-// RULING R4 will replace this with
-// "<id> is not closed (status: <status>); nothing to do" and no hook.
-func TestParityReopenNonDoneStatusReportsSuccess(t *testing.T) {
+// Before the rewire the engine already no-opped
+// (internal/storage/issueops/reopen.go returns Changed=false for a non-done
+// category) but the CLI still called ReopenIssue — firing an on_update hook —
+// printed "↻ Reopened" and exited 0, so the success report was a lie about a
+// status that never moved.
+//
+// The message goes to stderr, exactly like the already-open skip above: both
+// are "nothing to do" reports, and neither issue appears in --json output.
+func TestParityReopenNonDoneStatusReportsNothingToDo(t *testing.T) {
 	env := newParityEnv(t)
 	env.seed("test-rop6", "In progress", func(i *types.Issue) {
 		i.Status = types.StatusInProgress
@@ -1820,18 +1826,22 @@ func TestParityReopenNonDoneStatusReportsSuccess(t *testing.T) {
 	env.setFlags(reopenCmd, nil)
 	res := env.run(reopenCmd, "test-rop6")
 
-	// RULING R4: today this reports success.
+	// RULING R4: still exit 0 — this is not an error, just a no-op.
 	if res.exitCode != 0 {
 		t.Fatalf("exit = %d, want 0\nstderr:\n%s", res.exitCode, res.stderr)
 	}
-	if res.stdout != "↻ Reopened test-rop6\n" {
-		t.Errorf("stdout = %q; today a non-done reopen still prints \"↻ Reopened\"", res.stdout)
+	if res.stdout != "" {
+		t.Errorf("stdout = %q, want empty (nothing was reopened)", res.stdout)
 	}
-	// RULING R4: and the store call (hence the on_update hook) still happens.
-	if got := env.store.mutations(); strings.Join(got, ",") != "ReopenIssue" {
-		t.Errorf("store mutation calls = %v, want [ReopenIssue] (the hook still fires today)", got)
+	const wantErr = "test-rop6 is not closed (status: in_progress); nothing to do\n"
+	if res.stderr != wantErr {
+		t.Errorf("stderr = %q, want %q", res.stderr, wantErr)
 	}
-	// RULING R4: while the status never changed.
+	// RULING R4: and no hook fires, because no operation reported a change.
+	if got := env.store.mutations(); len(got) != 0 {
+		t.Errorf("operations = %v, want none recorded (a no-op reopen fires no hook)", got)
+	}
+	// The status is still what it was.
 	if got := env.get("test-rop6").Status; got != types.StatusInProgress {
 		t.Errorf("status = %q, want in_progress (the engine no-ops)", got)
 	}
