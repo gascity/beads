@@ -176,9 +176,17 @@ func DetermineEventType(oldIssue *types.Issue, updates map[string]interface{}) t
 // transaction that will perform the write, so a custom status configured as
 // done counts exactly as the built-in closed status does.
 //
-// It is false without a status update, for a value whose Go type cannot carry a
-// status, and for a move that starts in the done category — a done-to-done
-// restatement is not a crossing, and reopening is the operation that leaves.
+// It is false without a status update, and for a move that starts in the done
+// category — a done-to-done restatement is not a crossing, and reopening is the
+// operation that leaves.
+//
+// A status value whose Go type cannot carry a status is a validation error, not
+// a false. Both write funnels ask this question to decide whether close policy
+// applies, so answering "no crossing" for a value nobody can read would let an
+// in-process caller that got the transport wrong land status='closed' with the
+// policy gate skipped — on an issue with open children, no less. Refusing here
+// gives a mis-typed status the same fail-loud handling the mis-typed override
+// key already gets (see PopForceClosePolicy).
 func CrossesIntoDoneCategoryInTx(ctx context.Context, tx DBTX, oldStatus types.Status, updates map[string]interface{}) (bool, error) {
 	rawStatus, hasStatus := updates["status"]
 	if !hasStatus {
@@ -191,7 +199,7 @@ func CrossesIntoDoneCategoryInTx(ctx context.Context, tx DBTX, oldStatus types.S
 	case types.Status:
 		newStatus = value
 	default:
-		return false, nil
+		return false, fmt.Errorf("%w: status value of type %T is neither a string nor a types.Status", storage.ErrValidation, rawStatus)
 	}
 
 	newCategory, err := ReopenCategoryInTx(ctx, tx, newStatus)

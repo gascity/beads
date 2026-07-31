@@ -236,7 +236,9 @@ func getClosePolicyStatus(t *testing.T, ctx context.Context, store *DoltStore, i
 
 // TestCrossesIntoDoneCategoryInTx pins the trigger for the gate. It fires on a
 // move INTO the done category from outside it — for a configured done status
-// exactly as for the built-in closed — and on nothing else.
+// exactly as for the built-in closed — and on nothing else. A status value it
+// cannot read is the one case that is neither: it refuses, because a false
+// there would wave the update past the gate.
 func TestCrossesIntoDoneCategoryInTx(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -252,27 +254,37 @@ func TestCrossesIntoDoneCategoryInTx(t *testing.T) {
 		old     types.Status
 		updates map[string]interface{}
 		want    bool
+		wantErr bool
 	}{
-		{"open to built-in closed", types.StatusOpen, map[string]interface{}{"status": "closed"}, true},
-		{"open to configured done", types.StatusOpen, map[string]interface{}{"status": "archived"}, true},
-		{"typed status value", types.StatusOpen, map[string]interface{}{"status": types.StatusClosed}, true},
-		{"wip to done", types.StatusInProgress, map[string]interface{}{"status": "closed"}, true},
-		{"configured wip is not done", types.StatusOpen, map[string]interface{}{"status": "review"}, false},
-		{"open to open", types.StatusOpen, map[string]interface{}{"status": "in_progress"}, false},
-		{"done to done", types.StatusClosed, map[string]interface{}{"status": "closed"}, false},
-		{"closed to configured done", types.StatusClosed, map[string]interface{}{"status": "archived"}, false},
-		{"configured done to closed", types.Status("archived"), map[string]interface{}{"status": "closed"}, false},
-		{"no status update", types.StatusOpen, map[string]interface{}{"priority": 1}, false},
-		{"non-string status value", types.StatusOpen, map[string]interface{}{"status": 7}, false},
-		{"unknown status is unspecified", types.StatusOpen, map[string]interface{}{"status": "not-configured"}, false},
+		{name: "open to built-in closed", old: types.StatusOpen, updates: map[string]interface{}{"status": "closed"}, want: true},
+		{name: "open to configured done", old: types.StatusOpen, updates: map[string]interface{}{"status": "archived"}, want: true},
+		{name: "typed status value", old: types.StatusOpen, updates: map[string]interface{}{"status": types.StatusClosed}, want: true},
+		{name: "wip to done", old: types.StatusInProgress, updates: map[string]interface{}{"status": "closed"}, want: true},
+		{name: "configured wip is not done", old: types.StatusOpen, updates: map[string]interface{}{"status": "review"}},
+		{name: "open to open", old: types.StatusOpen, updates: map[string]interface{}{"status": "in_progress"}},
+		{name: "done to done", old: types.StatusClosed, updates: map[string]interface{}{"status": "closed"}},
+		{name: "closed to configured done", old: types.StatusClosed, updates: map[string]interface{}{"status": "archived"}},
+		{name: "configured done to closed", old: types.Status("archived"), updates: map[string]interface{}{"status": "closed"}},
+		{name: "no status update", old: types.StatusOpen, updates: map[string]interface{}{"priority": 1}},
+		{name: "unknown status is unspecified", old: types.StatusOpen, updates: map[string]interface{}{"status": "not-configured"}},
+		{name: "unreadable status value refuses", old: types.StatusOpen, updates: map[string]interface{}{"status": 7}, wantErr: true},
+		{name: "byte-slice status value refuses", old: types.StatusOpen, updates: map[string]interface{}{"status": []byte("closed")}, wantErr: true},
+		{name: "nil status value refuses", old: types.StatusOpen, updates: map[string]interface{}{"status": nil}, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var got bool
-			if err := inRolledBackTx(t, ctx, store, func(tx *sql.Tx) error {
+			err := inRolledBackTx(t, ctx, store, func(tx *sql.Tx) error {
 				var err error
 				got, err = issueops.CrossesIntoDoneCategoryInTx(ctx, tx, tc.old, tc.updates)
 				return err
-			}); err != nil {
+			})
+			if tc.wantErr {
+				if !errors.Is(err, storage.ErrValidation) {
+					t.Fatalf("CrossesIntoDoneCategoryInTx(%q, %v) error = %v, want storage.ErrValidation", tc.old, tc.updates, err)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("CrossesIntoDoneCategoryInTx: %v", err)
 			}
 			if got != tc.want {
