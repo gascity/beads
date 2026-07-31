@@ -118,6 +118,11 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		return nil
 	}
 	updates = cloneUpdateFields(updates)
+	// Pop the close-policy override before anything reads the map as a set of
+	// columns, mirroring issueops.updateIssueInTx. The no-op filter below keeps
+	// unrecognized keys, so a surviving override would reach the field
+	// allowlist and be refused by name.
+	_ = issueops.PopForceClosePolicy(updates)
 
 	// Bound the VARCHAR(255) assignment columns before touching SQL, mirroring
 	// issueops.updateIssueInTx: an over-length assignee/owner aborts with a typed

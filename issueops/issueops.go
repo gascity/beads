@@ -200,6 +200,14 @@ type UpdateRequest struct {
 	// no effect with Claim or an omitted Patch.Assignee and must be false with
 	// ExpectedAssignee. It never bypasses other guards.
 	ForceAssigneeTransfer bool
+	// ForceClosePolicy bypasses only close policy — the open-children refusal
+	// and the live-direct-blocker refusal — for a Patch.Status that crosses into
+	// the done category. The zero value enforces the policy. It has no effect
+	// without such a status change, and never bypasses validation,
+	// ExpectedVersion, ExpectedAssignee, ExpectedStatus, or the assignee fence.
+	// It is the update-side spelling of CloseRequest.Force; a command adapter
+	// that maps one flag to both spells both.
+	ForceClosePolicy bool
 	// ExpectedVersion requires the current row version to match before the claim
 	// and patch. It is an independent precondition and may be combined with Claim.
 	ExpectedVersion *int64

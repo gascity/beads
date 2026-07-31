@@ -235,6 +235,11 @@ func UpdateIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, update
 
 func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool) (*UpdateResult, error) {
 	updates = cloneUpdateFields(updates)
+	// Pop the override before anything reads the map as a set of columns. It
+	// has to come out ahead of the no-op filter too: the filter keeps every key
+	// it does not recognize, so a surviving override would reach the field
+	// allowlist and be refused by name.
+	_ = PopForceClosePolicy(updates)
 
 	// Route to correct table.
 	isWisp := IsActiveWispInTx(ctx, tx, id)
@@ -414,6 +419,36 @@ const (
 	// (bd update --append-notes). Value: string.
 	OpAppendNotes = "append_notes"
 )
+
+// OpForceClosePolicy carries a close-policy override into a generic update
+// (bd update --force). Value: bool. It is not a merge operation and not a
+// column — the write funnels pop it before validating fields, so it never
+// reaches SQL.
+//
+// It rides the update map, like the merge operations, so adding the override
+// breaks no interface. That choice has a deliberate failure mode: the field
+// allowlists do not name this key, so an occurrence that reaches field
+// validation unpopped is refused by name. A caller that misspells the override,
+// or a write path that forgets to pop it, fails loudly instead of quietly
+// running the update with force read as off.
+const OpForceClosePolicy = "_force_close_policy"
+
+// PopForceClosePolicy removes the close-policy override from updates and
+// reports whether it asked for force. A value that is not a bool is left in
+// place on purpose: it cannot be read as an intent, and leaving it lets the
+// field allowlist refuse it by name.
+func PopForceClosePolicy(updates map[string]interface{}) bool {
+	raw, present := updates[OpForceClosePolicy]
+	if !present {
+		return false
+	}
+	force, isBool := raw.(bool)
+	if !isBool {
+		return false
+	}
+	delete(updates, OpForceClosePolicy)
+	return force
+}
 
 // HasMergeOps reports whether the update map carries any read-merge-write
 // operation key. Updates with merge ops must resolve those ops against the row
