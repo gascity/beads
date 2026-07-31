@@ -46,10 +46,12 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // ===== counting store decorator =====
@@ -150,6 +152,61 @@ func (p *parityStore) RemoveDependency(ctx context.Context, issueID, dependsOnID
 	return p.inner.RemoveDependency(ctx, issueID, dependsOnID, actor)
 }
 
+// ===== counting issue-operations facade =====
+
+// parityOps is parityStore's counterpart on the issue-operations facade, the
+// surface the write verbs move onto. It records into the SAME call list, so
+// `mutations()` stays one entry per hook firing however the verb reached the
+// database — a verb still on a direct store call records "UpdateIssue", a
+// rewired verb records "Update".
+//
+// The firing rules mirror beads.hookIssueOperations exactly, which is what
+// makes the counts comparable across the rewire: Create, Update and Close fire
+// their completion hook on any success; Reopen fires only when it changed
+// something.
+//
+// A facade is required here because beads.NewIssueOperations never routes
+// through the DoltStorage methods parityStore decorates — it builds operations
+// straight off the concrete store — so once a verb is rewired, store-level
+// counting goes blind and every "no store mutations" assertion would pass
+// vacuously.
+type parityOps struct {
+	inner issueops.Operations
+	store *parityStore
+}
+
+func (o *parityOps) Create(ctx context.Context, request issueops.CreateRequest) (issueops.CreateResult, error) {
+	result, err := o.inner.Create(ctx, request)
+	if err == nil {
+		o.store.record("Create")
+	}
+	return result, err
+}
+
+func (o *parityOps) Update(ctx context.Context, request issueops.UpdateRequest) (issueops.UpdateResult, error) {
+	result, err := o.inner.Update(ctx, request)
+	if err == nil {
+		o.store.record("Update")
+	}
+	return result, err
+}
+
+func (o *parityOps) Close(ctx context.Context, request issueops.CloseRequest) (issueops.CloseResult, error) {
+	result, err := o.inner.Close(ctx, request)
+	if err == nil {
+		o.store.record("Close")
+	}
+	return result, err
+}
+
+func (o *parityOps) Reopen(ctx context.Context, request issueops.ReopenRequest) (issueops.ReopenResult, error) {
+	result, err := o.inner.Reopen(ctx, request)
+	if err == nil && result.Changed {
+		o.store.record("Reopen")
+	}
+	return result, err
+}
+
 // ===== harness =====
 
 type parityEnv struct {
@@ -181,10 +238,27 @@ func newParityEnv(t *testing.T) *parityEnv {
 
 	savedCtx, savedJSON, savedActor := rootCtx, jsonOutput, actor
 	savedQuiet, savedReadonly := quietFlag, readonlyMode
+	savedNewOps := newIssueOperations
 	t.Cleanup(func() {
 		rootCtx, jsonOutput, actor = savedCtx, savedJSON, savedActor
 		quietFlag, readonlyMode = savedQuiet, savedReadonly
+		newIssueOperations = savedNewOps
 	})
+
+	// Count the facade operations the write verbs perform. The real store is
+	// unwrapped first because beads.NewIssueOperations only peels the
+	// decorators it knows (hooks, telemetry) and refuses any other, and
+	// parityStore is deliberately shaped like one.
+	newIssueOperations = func(target beads.Storage) (issueops.Operations, error) {
+		if decorated, ok := target.(storage.DoltStorage); ok {
+			target = storage.UnwrapStore(decorated)
+		}
+		inner, err := beads.NewIssueOperations(target)
+		if err != nil {
+			return nil, err
+		}
+		return &parityOps{inner: inner, store: ps}, nil
+	}
 
 	store = ps
 	rootCtx = context.Background()
