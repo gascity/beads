@@ -205,6 +205,81 @@ func RunIssueOperationsUpdateFoldsMetadataIntoOneEvent(t *testing.T, ctx context
 	events.assert(t, "no-op metadata update", 0, nil)
 }
 
+// RunIssueOperationsUpdateClosePolicy pins what a generic status update does
+// when it crosses from a non-done status into the done category. `bd close`
+// refuses an issue that still has open parent-child children or a live direct
+// blocker; this case records whether the generic update path applies the same
+// policy. Until now the contract had no boundary-crossing case at all, and that
+// gap is exactly how two earlier attempts at a shared policy check reached a
+// backend that could not satisfy them without any test noticing.
+func RunIssueOperationsUpdateClosePolicy(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+
+	parentID := fixture.IssuePrefix + "-closepolicy-parent"
+	seedClosePolicyIssue(t, ctx, fixture, parentID, publicops.CreateRequest{})
+	seedClosePolicyIssue(t, ctx, fixture, fixture.IssuePrefix+"-closepolicy-child", publicops.CreateRequest{ParentID: parentID})
+
+	blockerID := fixture.IssuePrefix + "-closepolicy-blocker"
+	blockedID := fixture.IssuePrefix + "-closepolicy-blocked"
+	seedClosePolicyIssue(t, ctx, fixture, blockerID, publicops.CreateRequest{})
+	seedClosePolicyIssue(t, ctx, fixture, blockedID, publicops.CreateRequest{
+		Dependencies: []publicops.CreateDependency{{TargetID: blockerID, Type: types.DepBlocks}},
+	})
+
+	// CHARACTERIZATION: today a generic status update carries the close EFFECTS
+	// (closed_at, the closed event) but none of the close POLICY, so both
+	// refusals that `bd close` raises are silently skipped here.
+	openChildren, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(parentID))
+	if err != nil {
+		t.Fatalf("update %s into done with an open child: %v", parentID, err)
+	}
+	if !openChildren.Changed || openChildren.Issue.Status != types.StatusClosed {
+		t.Fatalf("update %s into done = %#v, want a committed close", parentID, openChildren)
+	}
+
+	liveBlocker, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(blockedID))
+	if err != nil {
+		t.Fatalf("update %s into done with a live blocker: %v", blockedID, err)
+	}
+	if !liveBlocker.Changed || liveBlocker.Issue.Status != types.StatusClosed {
+		t.Fatalf("update %s into done = %#v, want a committed close", blockedID, liveBlocker)
+	}
+
+	// A done-to-done restatement is filtered out as a no-op before any policy
+	// could observe it, so it stays free of both refusals either way.
+	reclose, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(parentID))
+	if err != nil {
+		t.Fatalf("restate %s as done: %v", parentID, err)
+	}
+	if reclose.Changed {
+		t.Errorf("restating %s as done reported Changed = true, want a no-op", parentID)
+	}
+}
+
+// closePolicyStatusRequest builds the generic status update that crosses into
+// the done category — the operation whose policy this case pins.
+func closePolicyStatusRequest(id string) publicops.UpdateRequest {
+	return publicops.UpdateRequest{
+		Actor:   "writer",
+		IssueID: id,
+		Patch:   publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusClosed}},
+	}
+}
+
+// seedClosePolicyIssue creates one open task at an explicit ID, carrying any
+// relationships the close-policy case needs. It goes through Create rather than
+// the fixture's raw seed hook so the edges recompute is_blocked exactly as a
+// real create would.
+func seedClosePolicyIssue(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id string, request publicops.CreateRequest) {
+	t.Helper()
+	request.Actor = "seed"
+	request.ForceIDPrefix = true
+	request.Issue = &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if _, err := fixture.Operations.Create(ctx, request); err != nil {
+		t.Fatalf("seed %s: %v", id, err)
+	}
+}
+
 func assertIssueOperationsRowCount(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, table, id string, want int) {
 	t.Helper()
 	var got int
