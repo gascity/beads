@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
@@ -13,8 +12,6 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
-
-const maxPublicCommentIDLen = 36
 
 // PublicCreateContext holds the configuration required to prepare a public
 // create request for the domain create use case.
@@ -50,27 +47,6 @@ func ValidatePublicCreateRequest(request publicops.CreateRequest) error {
 	if err := types.CheckFieldLen("parent ID", request.ParentID); err != nil {
 		return publicCreateValidationError(fmt.Errorf("create: %w", err))
 	}
-	importedCommentIDs := make(map[string]struct{}, len(request.Comments))
-	for index, comment := range request.Comments {
-		if comment == nil {
-			return publicCreateValidationError(fmt.Errorf("create: comment must not be nil"))
-		}
-		if n := utf8.RuneCountInString(comment.ID); n > maxPublicCommentIDLen {
-			return publicCreateValidationError(fmt.Errorf("create: comment %d ID is %d characters (max %d)", index, n, maxPublicCommentIDLen))
-		}
-		if comment.ID != "" {
-			if _, exists := importedCommentIDs[comment.ID]; exists {
-				return publicCreateValidationError(fmt.Errorf("create: duplicate imported comment ID %q", comment.ID))
-			}
-			importedCommentIDs[comment.ID] = struct{}{}
-		}
-		if err := types.CheckFieldLen("comment author", comment.Author); err != nil {
-			return publicCreateValidationError(fmt.Errorf("create: comment %d: %w", index, err))
-		}
-		if comment.Text == "" {
-			return publicCreateValidationError(fmt.Errorf("create: comment %d text must not be empty", index))
-		}
-	}
 	return validatePublicCreateDependencies(request)
 }
 
@@ -95,15 +71,6 @@ func PreparePublicCreateRequest(request publicops.CreateRequest, context PublicC
 	}
 	prepared := request
 	prepared.Issue = issue
-	for _, comment := range prepared.Comments {
-		comment.IssueID = ""
-		if comment.Author == "" {
-			comment.Author = prepared.Actor
-		}
-		if !comment.CreatedAt.IsZero() {
-			comment.CreatedAt = comment.CreatedAt.UTC()
-		}
-	}
 	if prepared.WaitsFor != nil && prepared.WaitsFor.Gate == "" {
 		prepared.WaitsFor.Gate = string(types.WaitsForAllChildren)
 	}

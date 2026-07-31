@@ -29,13 +29,7 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	if err != nil {
 		return publicops.CreateResult{}, nil, err
 	}
-	for _, comment := range attempt.Comments {
-		if comment.Author == "" {
-			comment.Author = attempt.Actor
-		}
-	}
 	issue := attempt.Issue
-	issue.Comments = attempt.Comments
 	// Configured infra types live in the wisp tables, the same routing the
 	// stores' own CreateIssue applies (internal/storage/dolt/issues.go). Mark
 	// the issue before its ID is assigned so ID generation, the create-only
@@ -160,7 +154,6 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		}
 	}
 	updates := UpdateFields(attempt.Patch)
-	OmitUnchangedUpdateFields(current, updates)
 	// A metadata patch rides the same row write as the field edits. Writing it
 	// separately recorded a second event for one atomic mutation, fabricating
 	// an update that never happened for every consumer of the event stream.
@@ -236,9 +229,6 @@ func ExecuteClose(ctx context.Context, tx *sql.Tx, request publicops.CloseReques
 	if attempt.Actor == "" || attempt.IssueID == "" {
 		return publicops.CloseResult{}, nil, fmt.Errorf("%w: close requires actor and issue ID", storage.ErrValidation)
 	}
-	if err := ValidateMetadataPatch(attempt.Metadata); err != nil {
-		return publicops.CloseResult{}, nil, err
-	}
 	closed, err := CloseIssueCheckedInTx(ctx, tx, attempt.IssueID, attempt.Reason, attempt.Actor, attempt.Session, attempt.Force, attempt.ExpectedVersion)
 	if err != nil {
 		return publicops.CloseResult{}, nil, err
@@ -251,28 +241,6 @@ func ExecuteClose(ctx context.Context, tx *sql.Tx, request publicops.CloseReques
 	}
 	if closed.IssueRowsChanged {
 		tables.Add("issues")
-	}
-	current, err := GetIssueInTx(ctx, tx, attempt.IssueID)
-	if err != nil {
-		return publicops.CloseResult{}, nil, err
-	}
-	metadata, metadataChanged, err := ApplyMetadataPatch(current.Metadata, attempt.Metadata)
-	if err != nil {
-		return publicops.CloseResult{}, nil, err
-	}
-	if metadataChanged {
-		updated, err := UpdateIssueInTx(ctx, tx, attempt.IssueID, map[string]interface{}{"metadata": metadata}, attempt.Actor)
-		if err != nil {
-			return publicops.CloseResult{}, nil, err
-		}
-		if updated.Changed {
-			changed = true
-			issueTable, _, eventTable, _ := WispTableRouting(updated.IsWisp)
-			tables.Add(issueTable, eventTable)
-			if updated.IssueRowsChanged {
-				tables.Add("issues")
-			}
-		}
 	}
 	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
 	if err != nil {

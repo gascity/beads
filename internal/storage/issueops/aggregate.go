@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -65,72 +64,6 @@ func UpdateFields(patch publicops.IssuePatch) map[string]interface{} {
 		}
 	}
 	return updates
-}
-
-// OmitUnchangedUpdateFields removes scalar updates equal to current values.
-func OmitUnchangedUpdateFields(current *types.Issue, updates map[string]interface{}) {
-	for field, value := range updates {
-		if SameIssueUpdateField(current, field, value) {
-			delete(updates, field)
-		}
-	}
-}
-
-// SameIssueUpdateField reports whether value equals a scalar issue field.
-func SameIssueUpdateField(current *types.Issue, field string, value interface{}) bool {
-	if current == nil {
-		return false
-	}
-	switch field {
-	case "title":
-		return current.Title == value.(string)
-	case "description":
-		return current.Description == value.(string)
-	case "design":
-		return current.Design == value.(string)
-	case "acceptance_criteria":
-		return current.AcceptanceCriteria == value.(string)
-	case "notes":
-		return current.Notes == value.(string)
-	case "spec_id":
-		return current.SpecID == value.(string)
-	case "await_id":
-		return current.AwaitID == value.(string)
-	case "status":
-		return current.Status == value.(types.Status)
-	case "priority":
-		return current.Priority == value.(int)
-	case "issue_type":
-		return current.IssueType == value.(types.IssueType)
-	case "assignee":
-		return current.Assignee == value.(string)
-	case "owner":
-		return current.Owner == value.(string)
-	case "closed_by_session":
-		return current.ClosedBySession == value.(string)
-	case "estimated_minutes":
-		return sameOptionalInt(current.EstimatedMinutes, value.(*int))
-	case "external_ref":
-		return sameOptionalString(current.ExternalRef, value.(*string))
-	case "due_at":
-		return sameOptionalTime(current.DueAt, value.(*time.Time))
-	case "defer_until":
-		return sameOptionalTime(current.DeferUntil, value.(*time.Time))
-	default:
-		return false
-	}
-}
-
-func sameOptionalInt(left, right *int) bool {
-	return left == nil && right == nil || left != nil && right != nil && *left == *right
-}
-
-func sameOptionalString(left, right *string) bool {
-	return left == nil && right == nil || left != nil && right != nil && *left == *right
-}
-
-func sameOptionalTime(left, right *time.Time) bool {
-	return left == nil && right == nil || left != nil && right != nil && left.Equal(*right)
 }
 
 // ValidateUpdateRequest checks mutually exclusive guarded-update options and

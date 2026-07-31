@@ -20,7 +20,7 @@ func TestPreparePublicCreateRequestNormalizesAcceptedFieldsAndIgnoresDerivedFiel
 		ID: "bd-public-create", Title: "title", Status: "custom", Priority: 2, IssueType: "custom-type",
 		Metadata: json.RawMessage(`{"key":true}`), ContentHash: "caller-hash", RowVersion: 42,
 		LeaseExpiresAt: &createdAt, CompactionLevel: 4, IDPrefix: "ignored", PrefixOverride: "ignored", IsLitePartial: true,
-	}, Comments: []*publicops.Comment{{IssueID: "caller", Text: "comment"}}}
+	}}
 
 	prepared, err := PreparePublicCreateRequest(request, PublicCreateContext{
 		IssuePrefix: "bd", CustomStatuses: []string{"custom"}, CustomTypes: []string{"custom-type"},
@@ -30,9 +30,6 @@ func TestPreparePublicCreateRequestNormalizesAcceptedFieldsAndIgnoresDerivedFiel
 	}
 	if prepared.Issue.ContentHash == "caller-hash" || prepared.Issue.RowVersion != 0 || prepared.Issue.LeaseExpiresAt != nil || prepared.Issue.CompactionLevel != 0 || prepared.Issue.IDPrefix != "" || prepared.Issue.PrefixOverride != "" || prepared.Issue.IsLitePartial {
 		t.Fatalf("derived fields survived preparation: %#v", prepared.Issue)
-	}
-	if prepared.Comments[0].IssueID != "" || prepared.Comments[0].Author != "actor" {
-		t.Fatalf("comment normalization = %#v", prepared.Comments[0])
 	}
 }
 
@@ -155,7 +152,7 @@ func TestValidatePublicCreateRequestAllowsEmptyWaitsForGate(t *testing.T) {
 	}
 }
 
-func TestValidatePublicCreateRequestRejectsInvalidImportedRelationsAndComments(t *testing.T) {
+func TestValidatePublicCreateRequestRejectsInvalidImportedRelations(t *testing.T) {
 	checks := []struct {
 		name    string
 		request publicops.CreateRequest
@@ -176,38 +173,6 @@ func TestValidatePublicCreateRequestRejectsInvalidImportedRelationsAndComments(t
 				Dependencies: []publicops.CreateDependency{{TargetID: "bd-target", Type: types.DepRelated, ThreadID: strings.Repeat("t", types.MaxFieldLen+1)}},
 			},
 		},
-		{
-			name: "overlong comment ID",
-			request: publicops.CreateRequest{
-				Actor:    "actor",
-				Issue:    &publicops.Issue{Title: "title"},
-				Comments: []*publicops.Comment{{ID: strings.Repeat("i", 37), Text: "comment"}},
-			},
-		},
-		{
-			name: "overlong comment author",
-			request: publicops.CreateRequest{
-				Actor:    "actor",
-				Issue:    &publicops.Issue{Title: "title"},
-				Comments: []*publicops.Comment{{Author: strings.Repeat("a", types.MaxFieldLen+1), Text: "comment"}},
-			},
-		},
-		{
-			name: "empty comment text",
-			request: publicops.CreateRequest{
-				Actor:    "actor",
-				Issue:    &publicops.Issue{Title: "title"},
-				Comments: []*publicops.Comment{{}},
-			},
-		},
-		{
-			name: "overlong default comment author",
-			request: publicops.CreateRequest{
-				Actor:    strings.Repeat("a", types.MaxFieldLen+1),
-				Issue:    &publicops.Issue{Title: "title"},
-				Comments: []*publicops.Comment{{Text: "comment"}},
-			},
-		},
 	}
 
 	for _, check := range checks {
@@ -217,26 +182,6 @@ func TestValidatePublicCreateRequestRejectsInvalidImportedRelationsAndComments(t
 				t.Fatalf("ValidatePublicCreateRequest() error = %v, want ErrValidation", err)
 			}
 		})
-	}
-}
-
-func TestValidatePublicCreateRequestRejectsDuplicateImportedCommentIDs(t *testing.T) {
-	request := publicops.CreateRequest{
-		Actor: "actor",
-		Issue: &publicops.Issue{Title: "title"},
-		Comments: []*publicops.Comment{
-			{ID: "imported-comment", Text: "first"},
-			{ID: "imported-comment", Text: "second"},
-		},
-	}
-	if err := ValidatePublicCreateRequest(request); !errors.Is(err, storage.ErrValidation) {
-		t.Fatalf("ValidatePublicCreateRequest() error = %v, want ErrValidation", err)
-	}
-
-	request.Comments[0].ID = ""
-	request.Comments[1].ID = ""
-	if err := ValidatePublicCreateRequest(request); err != nil {
-		t.Fatalf("ValidatePublicCreateRequest() repeated generated IDs error = %v, want nil", err)
 	}
 }
 

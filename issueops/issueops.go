@@ -17,20 +17,11 @@ type Issue = types.Issue
 // Status is an issue lifecycle status.
 type Status = types.Status
 
-// DependencyType classifies a dependency relationship.
-type DependencyType = types.DependencyType
-
 // IssueType classifies an issue.
 type IssueType = types.IssueType
 
 // PersistenceMode selects the complete persistence state for an issue.
 type PersistenceMode = types.PersistenceMode
-
-// StorageClass declares an issue's history and replication contract.
-type StorageClass = types.StorageClass
-
-// Comment is an issue comment.
-type Comment = types.Comment
 
 // Status values accepted by issue operations.
 const (
@@ -48,52 +39,6 @@ const (
 	PersistenceModePersistent = types.PersistenceModePersistent
 	PersistenceModeEphemeral  = types.PersistenceModeEphemeral
 	PersistenceModeNoHistory  = types.PersistenceModeNoHistory
-)
-
-// Storage class values exposed by issue operations.
-const (
-	StorageClassVersioned   = types.StorageClassVersioned
-	StorageClassUnversioned = types.StorageClassUnversioned
-	StorageClassEphemeral   = types.StorageClassEphemeral
-)
-
-// Issue type values accepted by issue operations.
-const (
-	TypeBug       = types.TypeBug
-	TypeFeature   = types.TypeFeature
-	TypeTask      = types.TypeTask
-	TypeEpic      = types.TypeEpic
-	TypeChore     = types.TypeChore
-	TypeDecision  = types.TypeDecision
-	TypeMessage   = types.TypeMessage
-	TypeMolecule  = types.TypeMolecule
-	TypeGate      = types.TypeGate
-	TypeSpike     = types.TypeSpike
-	TypeStory     = types.TypeStory
-	TypeMilestone = types.TypeMilestone
-)
-
-// Dependency type values accepted by issue operations.
-const (
-	DepBlocks            = types.DepBlocks
-	DepParentChild       = types.DepParentChild
-	DepConditionalBlocks = types.DepConditionalBlocks
-	DepWaitsFor          = types.DepWaitsFor
-	DepRelated           = types.DepRelated
-	DepDiscoveredFrom    = types.DepDiscoveredFrom
-	DepRepliesTo         = types.DepRepliesTo
-	DepRelatesTo         = types.DepRelatesTo
-	DepDuplicates        = types.DepDuplicates
-	DepSupersedes        = types.DepSupersedes
-	DepAuthoredBy        = types.DepAuthoredBy
-	DepAssignedTo        = types.DepAssignedTo
-	DepApprovedBy        = types.DepApprovedBy
-	DepAttests           = types.DepAttests
-	DepTracks            = types.DepTracks
-	DepUntil             = types.DepUntil
-	DepCausedBy          = types.DepCausedBy
-	DepValidates         = types.DepValidates
-	DepDelegatedFrom     = types.DepDelegatedFrom
 )
 
 // Waits-for gate values accepted by issue operations.
@@ -185,7 +130,7 @@ type IssuePatch struct {
 // CreateDependency describes a dependency created with an issue.
 type CreateDependency struct {
 	TargetID string
-	Type     DependencyType
+	Type     types.DependencyType
 	// Reverse writes the dependency from TargetID to the new issue.
 	Reverse  bool
 	Metadata string
@@ -216,18 +161,9 @@ type CreateRequest struct {
 	// molecule, work-type, and event fields using the canonical create rules. It
 	// ignores ContentHash, RowVersion, lease state, compaction state, routing
 	// overrides, hydration flags, and derived fields. Labels are authoritative.
-	// Comments and Dependencies must be empty; use the corresponding request
-	// fields.
+	// Issue.Comments and Issue.Dependencies must be empty; supply edges through
+	// the request's own Dependencies field.
 	Issue *Issue
-	// Comments is the authoritative set of comments created with the issue.
-	// Each comment is attached to the created issue: an implementation overwrites
-	// its IssueID with the created issue ID, ignoring any caller-supplied value.
-	// An empty Author defaults to Actor; a nonempty Author is preserved. A
-	// nonempty ID and nonzero CreatedAt are preserved for imports; an empty ID
-	// or zero CreatedAt is generated or defaulted by the implementation.
-	// Attachment and defaulting normalize attempt-local clones only; caller-owned
-	// Comment values are never mutated.
-	Comments []*Comment
 	// ParentID creates a typed DepParentChild edge. It must not duplicate an
 	// explicit edge in Dependencies.
 	ParentID string
@@ -292,9 +228,6 @@ type CloseRequest struct {
 	// ExpectedVersion requires the current row version to match and is checked
 	// before an idempotent close.
 	ExpectedVersion *int64
-	// Metadata is applied atomically with the close. An already-literal-closed
-	// issue may still apply metadata.
-	Metadata MetadataPatch
 }
 
 // ReopenRequest describes an issue reopening.
@@ -310,12 +243,10 @@ type ReopenRequest struct {
 }
 
 // CreateResult reports the created issue as a detached snapshot with labels,
-// dependencies, and normalized persisted comments.
-// Generated comment IDs and timestamps, defaulted authors, and attached IssueID
-// values are included in Issue.Comments.
+// dependencies, and persisted comments.
 type CreateResult struct {
-	// Issue is a detached snapshot with labels, dependencies, and normalized
-	// persisted comments.
+	// Issue is a detached snapshot with labels, dependencies, and persisted
+	// comments.
 	Issue *Issue
 }
 
@@ -336,8 +267,8 @@ type CloseResult struct {
 	// Issue is a detached post-state snapshot with labels and dependency records.
 	// Comments are omitted.
 	Issue *Issue
-	// Changed reports whether closing or metadata changes persisted a semantic
-	// mutation. It is false only when both are no-ops.
+	// Changed reports whether closing persisted a semantic mutation. It is false
+	// for an idempotent re-close.
 	Changed bool
 	// OpenChildren is the number of open children observed by a forced close.
 	// It is reported even for an idempotent re-close.

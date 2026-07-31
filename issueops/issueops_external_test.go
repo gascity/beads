@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/issueops"
@@ -86,22 +85,6 @@ func TestPublicPersistenceModeValues(t *testing.T) {
 	}
 }
 
-func TestPublicStorageClassValues(t *testing.T) {
-	cases := []struct {
-		got  issueops.StorageClass
-		want string
-	}{
-		{issueops.StorageClassVersioned, "versioned"},
-		{issueops.StorageClassUnversioned, "unversioned"},
-		{issueops.StorageClassEphemeral, "ephemeral"},
-	}
-	for _, tc := range cases {
-		if string(tc.got) != tc.want {
-			t.Errorf("storage class = %q, want %q", tc.got, tc.want)
-		}
-	}
-}
-
 func TestClaimRequestSupportsPostClaimPatch(t *testing.T) {
 	version := int64(7)
 	request := issueops.UpdateRequest{
@@ -127,24 +110,6 @@ func TestForceAssigneeTransferHasSafeZeroValue(t *testing.T) {
 	}
 }
 
-func TestCreateRequestCommentImportShape(t *testing.T) {
-	createdAt := time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC)
-	request := issueops.CreateRequest{
-		Actor: "worker",
-		Issue: &issueops.Issue{Title: "new issue"},
-		Comments: []*issueops.Comment{
-			{IssueID: "caller-supplied", Text: "defaults"},
-			{ID: "imported-comment", IssueID: "other", Author: "importer", Text: "preserved", CreatedAt: createdAt},
-		},
-	}
-	if got := request.Comments[0]; got.IssueID != "caller-supplied" || got.Author != "" || got.ID != "" || !got.CreatedAt.IsZero() {
-		t.Fatalf("defaultable comment shape changed: %#v", got)
-	}
-	if got := request.Comments[1]; got.ID != "imported-comment" || got.Author != "importer" || !got.CreatedAt.Equal(createdAt) {
-		t.Fatalf("import comment shape changed: %#v", got)
-	}
-}
-
 func TestPublicConstantsKeepCanonicalValues(t *testing.T) {
 	statuses := []struct {
 		got  issueops.Status
@@ -162,64 +127,11 @@ func TestPublicConstantsKeepCanonicalValues(t *testing.T) {
 		}
 	}
 
-	issueTypes := []struct {
-		got  issueops.IssueType
-		want beads.IssueType
-	}{
-		{issueops.TypeBug, beads.TypeBug},
-		{issueops.TypeFeature, beads.TypeFeature},
-		{issueops.TypeTask, beads.TypeTask},
-		{issueops.TypeEpic, beads.TypeEpic},
-		{issueops.TypeChore, beads.TypeChore},
-	}
-	for _, check := range issueTypes {
-		if check.got != check.want {
-			t.Fatalf("issue type constant = %q, want %q", check.got, check.want)
-		}
-	}
-
-	dependencyTypes := []struct {
-		got  issueops.DependencyType
-		want beads.DependencyType
-	}{
-		{issueops.DepBlocks, beads.DepBlocks},
-		{issueops.DepParentChild, beads.DepParentChild},
-		{issueops.DepConditionalBlocks, beads.DepConditionalBlocks},
-		{issueops.DepRelated, beads.DepRelated},
-		{issueops.DepDiscoveredFrom, beads.DepDiscoveredFrom},
-	}
-	for _, check := range dependencyTypes {
-		if check.got != check.want {
-			t.Fatalf("dependency type constant = %q, want %q", check.got, check.want)
-		}
-	}
-
 	for name, got := range map[string]string{
-		"pinned":         string(issueops.StatusPinned),
-		"hooked":         string(issueops.StatusHooked),
-		"decision":       string(issueops.TypeDecision),
-		"message":        string(issueops.TypeMessage),
-		"molecule":       string(issueops.TypeMolecule),
-		"gate":           string(issueops.TypeGate),
-		"spike":          string(issueops.TypeSpike),
-		"story":          string(issueops.TypeStory),
-		"milestone":      string(issueops.TypeMilestone),
-		"waits-for":      string(issueops.DepWaitsFor),
-		"replies-to":     string(issueops.DepRepliesTo),
-		"relates-to":     string(issueops.DepRelatesTo),
-		"duplicates":     string(issueops.DepDuplicates),
-		"supersedes":     string(issueops.DepSupersedes),
-		"authored-by":    string(issueops.DepAuthoredBy),
-		"assigned-to":    string(issueops.DepAssignedTo),
-		"approved-by":    string(issueops.DepApprovedBy),
-		"attests":        string(issueops.DepAttests),
-		"tracks":         string(issueops.DepTracks),
-		"until":          string(issueops.DepUntil),
-		"caused-by":      string(issueops.DepCausedBy),
-		"validates":      string(issueops.DepValidates),
-		"delegated-from": string(issueops.DepDelegatedFrom),
-		"all-children":   issueops.WaitsForAllChildren,
-		"any-children":   issueops.WaitsForAnyChildren,
+		"pinned":       string(issueops.StatusPinned),
+		"hooked":       string(issueops.StatusHooked),
+		"all-children": issueops.WaitsForAllChildren,
+		"any-children": issueops.WaitsForAnyChildren,
 	} {
 		if got != name {
 			t.Errorf("public constant = %q, want %q", got, name)

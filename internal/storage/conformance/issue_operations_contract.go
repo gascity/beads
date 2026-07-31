@@ -97,7 +97,7 @@ func RunIssueOperationsCreateRejectsMissingDependencyTargets(t *testing.T, ctx c
 			id:     fixture.IssuePrefix + "-skipdep-explicit",
 			target: fixture.IssuePrefix + "-skipdep-missing-dep",
 			request: publicops.CreateRequest{
-				Dependencies: []publicops.CreateDependency{{TargetID: fixture.IssuePrefix + "-skipdep-missing-dep", Type: publicops.DepBlocks}},
+				Dependencies: []publicops.CreateDependency{{TargetID: fixture.IssuePrefix + "-skipdep-missing-dep", Type: types.DepBlocks}},
 			},
 		},
 		{
@@ -144,7 +144,7 @@ func RunIssueOperationsCreateRejectsMissingDependencyTargets(t *testing.T, ctx c
 		Actor:         "writer",
 		ForceIDPrefix: true,
 		Issue:         &types.Issue{ID: fixture.IssuePrefix + "-skipdep-ok", Title: "ok", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
-		Dependencies:  []publicops.CreateDependency{{TargetID: seed.ID, Type: publicops.DepBlocks}},
+		Dependencies:  []publicops.CreateDependency{{TargetID: seed.ID, Type: types.DepBlocks}},
 	})
 	if err != nil {
 		t.Fatalf("Create with existing target: %v", err)

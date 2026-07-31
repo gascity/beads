@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
-func TestIssueOperationsTypedMetadataPatchUpdateAndRecloseWithRealDolt(t *testing.T) {
+func TestIssueOperationsTypedMetadataPatchUpdateWithRealDolt(t *testing.T) {
 	ctx := context.Background()
 	operations := newMetadataPatchOperations(t, ctx)
 
@@ -38,23 +39,6 @@ func TestIssueOperationsTypedMetadataPatchUpdateAndRecloseWithRealDolt(t *testin
 		t.Fatal("Update() Changed = false, want true")
 	}
 	assertTypedMetadata(t, updated.Issue.Metadata)
-
-	closedID := createMetadataPatchIssue(t, ctx, operations, "bd-metadata-close")
-	firstClose, err := operations.Close(ctx, issueops.CloseRequest{Actor: "tester", IssueID: closedID})
-	if err != nil {
-		t.Fatalf("initial Close() error = %v", err)
-	}
-	if !firstClose.Changed {
-		t.Fatal("initial Close() Changed = false, want true")
-	}
-	reclosed, err := operations.Close(ctx, issueops.CloseRequest{Actor: "tester", IssueID: closedID, Metadata: patch()})
-	if err != nil {
-		t.Fatalf("metadata-only re-Close() error = %v", err)
-	}
-	if !reclosed.Changed {
-		t.Fatal("metadata-only re-Close() Changed = false, want true")
-	}
-	assertTypedMetadata(t, reclosed.Issue.Metadata)
 }
 
 func TestIssueOperationsMetadataPatchRejectsInvalidInputWithRealDolt(t *testing.T) {
@@ -89,23 +73,6 @@ func TestIssueOperationsMetadataPatchRejectsInvalidInputWithRealDolt(t *testing.
 				_, err := operations.Update(ctx, issueops.UpdateRequest{Actor: "tester", IssueID: id, Patch: issueops.IssuePatch{
 					Metadata: issueops.MetadataPatch{Merge: issueops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`[1]`)}},
 				}})
-				return err
-			},
-		},
-		{
-			name: "close rejects replace combined with set",
-			call: func(id string) error {
-				_, err := operations.Close(ctx, issueops.CloseRequest{Actor: "tester", IssueID: id, Metadata: issueops.MetadataPatch{
-					Replace: issueops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{}`)},
-					Set:     map[string]json.RawMessage{"set": json.RawMessage(`true`)},
-				}})
-				return err
-			},
-		},
-		{
-			name: "close rejects invalid unset key",
-			call: func(id string) error {
-				_, err := operations.Close(ctx, issueops.CloseRequest{Actor: "tester", IssueID: id, Metadata: issueops.MetadataPatch{Unset: []string{"bad key"}}})
 				return err
 			},
 		},
@@ -153,7 +120,7 @@ func newMetadataPatchOperations(t *testing.T, ctx context.Context) issueops.Oper
 func createMetadataPatchIssue(t *testing.T, ctx context.Context, operations issueops.Operations, id string) string {
 	t.Helper()
 	created, err := operations.Create(ctx, issueops.CreateRequest{Actor: "tester", Issue: &issueops.Issue{
-		ID: id, Title: id, IssueType: issueops.TypeTask, Priority: 2, Metadata: json.RawMessage(`{"keep":"yes","remove":"gone","overlap":"old","stable":true}`),
+		ID: id, Title: id, IssueType: types.TypeTask, Priority: 2, Metadata: json.RawMessage(`{"keep":"yes","remove":"gone","overlap":"old","stable":true}`),
 	}})
 	if err != nil {
 		t.Fatalf("Create(%q) error = %v", id, err)

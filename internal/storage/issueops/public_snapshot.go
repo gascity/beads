@@ -12,7 +12,6 @@ import (
 func CloneCreateRequest(request publicops.CreateRequest) publicops.CreateRequest {
 	clone := request
 	clone.Issue = clonePublicIssue(request.Issue)
-	clone.Comments = cloneComments(request.Comments)
 	clone.Dependencies = append([]publicops.CreateDependency(nil), request.Dependencies...)
 	if request.WaitsFor != nil {
 		waitsFor := *request.WaitsFor
@@ -48,10 +47,6 @@ func CloneUpdateRequest(request publicops.UpdateRequest) publicops.UpdateRequest
 func CloneCloseRequest(request publicops.CloseRequest) publicops.CloseRequest {
 	clone := request
 	clone.ExpectedVersion = cloneInt64(request.ExpectedVersion)
-	clone.Metadata.Replace.Value = cloneRawMessage(request.Metadata.Replace.Value)
-	clone.Metadata.Merge.Value = cloneRawMessage(request.Metadata.Merge.Value)
-	clone.Metadata.Set = cloneRawMessageMap(request.Metadata.Set)
-	clone.Metadata.Unset = append([]string(nil), request.Metadata.Unset...)
 	return clone
 }
 
@@ -98,8 +93,8 @@ func cloneDependencies(dependencies []*types.Dependency) []*types.Dependency {
 	return clone
 }
 
-func cloneComments(comments []*publicops.Comment) []*publicops.Comment {
-	clone := make([]*publicops.Comment, len(comments))
+func cloneComments(comments []*types.Comment) []*types.Comment {
+	clone := make([]*types.Comment, len(comments))
 	for i, comment := range comments {
 		if comment == nil {
 			continue

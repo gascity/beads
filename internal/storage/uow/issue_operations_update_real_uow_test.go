@@ -23,7 +23,7 @@ func TestIssueOperationsOwnerPatchPersists(t *testing.T) {
 		Issue: &issueops.Issue{
 			ID:        "bd-owner-patch",
 			Title:     "owner patch",
-			IssueType: issueops.TypeTask,
+			IssueType: types.TypeTask,
 			Priority:  2,
 		},
 	})
@@ -57,7 +57,7 @@ func TestIssueOperationsRejectsInvalidCanonicalUpdatesWithoutMutation(t *testing
 		Issue: &issueops.Issue{
 			ID:        "bd-invalid-update",
 			Title:     "valid incumbent",
-			IssueType: issueops.TypeTask,
+			IssueType: types.TypeTask,
 			Priority:  2,
 		},
 	})
@@ -108,7 +108,7 @@ func TestIssueOperationsCreateRejectsCrossTierIDCollisions(t *testing.T) {
 		Issue: &issueops.Issue{
 			ID:        "bd-cross-tier-durable",
 			Title:     "durable incumbent",
-			IssueType: issueops.TypeTask,
+			IssueType: types.TypeTask,
 			Priority:  2,
 		},
 	})
@@ -122,7 +122,7 @@ func TestIssueOperationsCreateRejectsCrossTierIDCollisions(t *testing.T) {
 		Issue: &issueops.Issue{
 			ID:        durable.Issue.ID,
 			Title:     "wisp replacement",
-			IssueType: issueops.TypeTask,
+			IssueType: types.TypeTask,
 			Priority:  2,
 			Ephemeral: true,
 		},
@@ -145,7 +145,7 @@ func TestIssueOperationsCreateRejectsCrossTierIDCollisions(t *testing.T) {
 		Issue: &issueops.Issue{
 			ID:        "bd-cross-tier-wisp",
 			Title:     "wisp incumbent",
-			IssueType: issueops.TypeTask,
+			IssueType: types.TypeTask,
 			Priority:  2,
 			Ephemeral: true,
 		},
@@ -160,7 +160,7 @@ func TestIssueOperationsCreateRejectsCrossTierIDCollisions(t *testing.T) {
 		Issue: &issueops.Issue{
 			ID:        wisp.Issue.ID,
 			Title:     "durable replacement",
-			IssueType: issueops.TypeTask,
+			IssueType: types.TypeTask,
 			Priority:  2,
 		},
 	})
@@ -187,7 +187,7 @@ func TestIssueOperationsTypedIssueTypeUsesConfiguredTypes(t *testing.T) {
 		Issue: &issueops.Issue{
 			ID:        "bd-typed-update",
 			Title:     "type patch",
-			IssueType: issueops.TypeTask,
+			IssueType: types.TypeTask,
 			Priority:  2,
 		},
 	})
@@ -258,7 +258,7 @@ func TestIssueOperationsSamePublicFieldsLeaveRowAndEventsUntouched(t *testing.T)
 			AwaitID:            "await-noop",
 			Status:             issueops.StatusOpen,
 			Priority:           2,
-			IssueType:          issueops.TypeTask,
+			IssueType:          types.TypeTask,
 			Owner:              "unchanged-owner",
 			ClosedBySession:    "session-noop",
 			EstimatedMinutes:   &minutes,
@@ -285,7 +285,7 @@ func TestIssueOperationsSamePublicFieldsLeaveRowAndEventsUntouched(t *testing.T)
 			AwaitID:            issueops.Field[string]{Set: true, Value: "await-noop"},
 			Status:             issueops.Field[issueops.Status]{Set: true, Value: issueops.StatusOpen},
 			Priority:           issueops.Field[int]{Set: true, Value: 2},
-			IssueType:          issueops.Field[issueops.IssueType]{Set: true, Value: issueops.TypeTask},
+			IssueType:          issueops.Field[issueops.IssueType]{Set: true, Value: types.TypeTask},
 			Assignee:           issueops.Field[string]{Set: true, Value: ""},
 			Owner:              issueops.Field[string]{Set: true, Value: "unchanged-owner"},
 			ClosedBySession:    issueops.Field[string]{Set: true, Value: "session-noop"},
@@ -316,7 +316,7 @@ func TestIssueOperationsClaimMutationCountsWhenPatchRestoresPriorState(t *testin
 		Issue: &issueops.Issue{
 			ID:        "bd-claim-restore",
 			Title:     "claim then restore",
-			IssueType: issueops.TypeTask,
+			IssueType: types.TypeTask,
 			Priority:  2,
 			StartedAt: &startedAt,
 		},

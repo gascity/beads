@@ -17,8 +17,7 @@ func TestCloneIssueOperationRequestsDeepCopyMutableFields(t *testing.T) {
 	now := time.Now().UTC()
 	request := publicops.CreateRequest{
 		Actor:        "actor",
-		Issue:        &publicops.Issue{Labels: []string{"one"}, Metadata: metadata, EstimatedMinutes: &value, ExternalRef: &ref, StartedAt: &now, ClosedAt: &now, LeaseExpiresAt: &now, HeartbeatAt: &now, DueAt: &now, DeferUntil: &now, CompactedAt: &now, CompactedAtCommit: &ref, Dependencies: []*types.Dependency{{Metadata: "dependency"}}, Comments: []*publicops.Comment{{Text: "nested"}}, BondedFrom: []types.BondRef{{SourceID: "source"}}, Waiters: []string{"waiter"}},
-		Comments:     []*publicops.Comment{{Text: "comment"}},
+		Issue:        &publicops.Issue{Labels: []string{"one"}, Metadata: metadata, EstimatedMinutes: &value, ExternalRef: &ref, StartedAt: &now, ClosedAt: &now, LeaseExpiresAt: &now, HeartbeatAt: &now, DueAt: &now, DeferUntil: &now, CompactedAt: &now, CompactedAtCommit: &ref, Dependencies: []*types.Dependency{{Metadata: "dependency"}}, Comments: []*types.Comment{{Text: "nested"}}, BondedFrom: []types.BondRef{{SourceID: "source"}}, Waiters: []string{"waiter"}},
 		Dependencies: []publicops.CreateDependency{{TargetID: "target"}},
 		WaitsFor:     &publicops.WaitsFor{SpawnerID: "parent"},
 	}
@@ -31,11 +30,10 @@ func TestCloneIssueOperationRequestsDeepCopyMutableFields(t *testing.T) {
 	cloned.Issue.Waiters[0] = "changed"
 	cloned.Issue.Dependencies[0].Metadata = "changed"
 	cloned.Issue.Comments[0].Text = "changed"
-	cloned.Comments[0].Text = "changed"
 	cloned.Dependencies[0].TargetID = "changed"
 	cloned.WaitsFor.SpawnerID = "changed"
 
-	if request.Issue.Labels[0] != "one" || string(request.Issue.Metadata) != `{"key":"value"}` || *request.Issue.EstimatedMinutes != 3 || *request.Issue.ExternalRef != "ref" || request.Issue.Waiters[0] != "waiter" || request.Issue.Dependencies[0].Metadata != "dependency" || request.Issue.Comments[0].Text != "nested" || request.Comments[0].Text != "comment" || request.Dependencies[0].TargetID != "target" || request.WaitsFor.SpawnerID != "parent" {
+	if request.Issue.Labels[0] != "one" || string(request.Issue.Metadata) != `{"key":"value"}` || *request.Issue.EstimatedMinutes != 3 || *request.Issue.ExternalRef != "ref" || request.Issue.Waiters[0] != "waiter" || request.Issue.Dependencies[0].Metadata != "dependency" || request.Issue.Comments[0].Text != "nested" || request.Dependencies[0].TargetID != "target" || request.WaitsFor.SpawnerID != "parent" {
 		t.Fatal("CloneCreateRequest() retained mutable caller-owned state")
 	}
 
@@ -73,7 +71,7 @@ func TestIssueOperationCloneFunctionsKeepFrozenRequestFields(t *testing.T) {
 	}
 
 	requestMutable := map[reflect.Type]map[string]bool{
-		reflect.TypeOf(publicops.CreateRequest{}): {"Issue": true, "Comments": true, "Dependencies": true, "WaitsFor": true},
+		reflect.TypeOf(publicops.CreateRequest{}): {"Issue": true, "Dependencies": true, "WaitsFor": true},
 		reflect.TypeOf(publicops.UpdateRequest{}): {"ExpectedVersion": true, "ExpectedAssignee": true, "ExpectedStatus": true},
 		reflect.TypeOf(publicops.CloseRequest{}):  {"ExpectedVersion": true},
 		reflect.TypeOf(publicops.ReopenRequest{}): {"ExpectedVersion": true},

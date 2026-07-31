@@ -53,7 +53,7 @@ func TestEmbeddedIssueOperationsGuardedVerbs(t *testing.T) {
 			t.Fatal(err)
 		}
 		target := create(t, "ops-target")
-		request := publicops.CreateRequest{Actor: "writer", Issue: &types.Issue{ID: "foreign-aggregate", Title: "aggregate", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, ParentID: parent.ID, InheritLabelsFromParent: true, Comments: []*types.Comment{{Text: "comment"}}, Dependencies: []publicops.CreateDependency{{TargetID: target.ID, Type: publicops.DepRelated, ThreadID: "thread"}, {TargetID: target.ID, Type: publicops.DepRelatesTo, Reverse: true, ThreadID: "reverse-thread"}}, WaitsFor: &publicops.WaitsFor{SpawnerID: spawner.ID}}
+		request := publicops.CreateRequest{Actor: "writer", Issue: &types.Issue{ID: "foreign-aggregate", Title: "aggregate", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, ParentID: parent.ID, InheritLabelsFromParent: true, Dependencies: []publicops.CreateDependency{{TargetID: target.ID, Type: types.DepRelated, ThreadID: "thread"}, {TargetID: target.ID, Type: types.DepRelatesTo, Reverse: true, ThreadID: "reverse-thread"}}, WaitsFor: &publicops.WaitsFor{SpawnerID: spawner.ID}}
 		_, err := operations.Create(ctx, request)
 		if !errors.Is(err, publicops.ErrPrefixMismatch) {
 			t.Fatalf("unforced foreign prefix error = %v, want ErrPrefixMismatch", err)
@@ -63,7 +63,7 @@ func TestEmbeddedIssueOperationsGuardedVerbs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("forced Create: %v", err)
 		}
-		if len(result.Issue.Labels) != 1 || result.Issue.Labels[0] != "parent-label" || len(result.Issue.Comments) != 1 || result.Issue.Comments[0].Author != "writer" || len(result.Issue.Dependencies) != 3 {
+		if len(result.Issue.Labels) != 1 || result.Issue.Labels[0] != "parent-label" || len(result.Issue.Dependencies) != 3 {
 			t.Fatalf("Create result aggregate = %#v", result.Issue)
 		}
 		inbound, err := te.store.GetDependentRecords(ctx, result.Issue.ID, "", 10, "")
@@ -349,15 +349,15 @@ func TestEmbeddedIssueOperationsLifecycleContractMatrix(t *testing.T) {
 		}
 		return issue
 	}
-	t.Run("close metadata session and reclose", func(t *testing.T) {
+	t.Run("close session and reclose", func(t *testing.T) {
 		issue := makeIssue("ops-life", types.StatusOpen, false)
-		result, err := ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: issue.ID, Reason: "because", Session: "session-1", Metadata: publicops.MetadataPatch{Merge: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"merge":true}`)}, Set: map[string]json.RawMessage{"set": json.RawMessage(`"value"`)}, Unset: []string{"merge"}}})
-		if err != nil || !result.Changed || result.Issue.ClosedBySession != "session-1" || result.Issue.CloseReason != "because" || !sameEmbeddedMetadataJSON(result.Issue.Metadata, json.RawMessage(`{"set":"value"}`)) {
-			t.Fatalf("first close session=%q reason=%q metadata=%q changed=%t error=%v", result.Issue.ClosedBySession, result.Issue.CloseReason, result.Issue.Metadata, result.Changed, err)
+		result, err := ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: issue.ID, Reason: "because", Session: "session-1"})
+		if err != nil || !result.Changed || result.Issue.ClosedBySession != "session-1" || result.Issue.CloseReason != "because" {
+			t.Fatalf("first close session=%q reason=%q changed=%t error=%v", result.Issue.ClosedBySession, result.Issue.CloseReason, result.Changed, err)
 		}
-		reclose, err := ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: issue.ID, Metadata: publicops.MetadataPatch{Replace: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"replacement":true}`)}}})
-		if err != nil || !reclose.Changed {
-			t.Fatalf("reclose=%#v,%v", reclose, err)
+		reclose, err := ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: issue.ID})
+		if err != nil || reclose.Changed {
+			t.Fatalf("idempotent reclose = %#v, %v; want unchanged", reclose, err)
 		}
 	})
 	t.Run("force reopen wisp", func(t *testing.T) {
@@ -475,7 +475,7 @@ func TestEmbeddedIssueOperationsUpdateAllScalarAndPointerFieldsReportChanged(t *
 		{"await ID clear", publicops.IssuePatch{AwaitID: publicops.Field[string]{Set: true}}, func(i *types.Issue) bool { return i.AwaitID == "" }},
 		{"status", publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: publicops.StatusInProgress}}, func(i *types.Issue) bool { return i.Status == publicops.StatusInProgress }},
 		{"priority zero", publicops.IssuePatch{Priority: publicops.Field[int]{Set: true}}, func(i *types.Issue) bool { return i.Priority == 0 }},
-		{"issue type", publicops.IssuePatch{IssueType: publicops.Field[publicops.IssueType]{Set: true, Value: publicops.TypeBug}}, func(i *types.Issue) bool { return i.IssueType == publicops.TypeBug }},
+		{"issue type", publicops.IssuePatch{IssueType: publicops.Field[publicops.IssueType]{Set: true, Value: types.TypeBug}}, func(i *types.Issue) bool { return i.IssueType == types.TypeBug }},
 		{"assignee clear", publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true}}, func(i *types.Issue) bool { return i.Assignee == "" }},
 		{"owner clear", publicops.IssuePatch{Owner: publicops.Field[string]{Set: true}}, func(i *types.Issue) bool { return i.Owner == "" }},
 		{"closed by session clear", publicops.IssuePatch{ClosedBySession: publicops.Field[string]{Set: true}}, func(i *types.Issue) bool { return i.ClosedBySession == "" }},
@@ -572,7 +572,7 @@ func TestEmbeddedIssueOperationsPersistenceRollbackWispAndDetachedResults(t *tes
 	if err != nil || strings.Join(stored.Labels, ",") != "added,keep" || !sameEmbeddedMetadataJSON(stored.Metadata, json.RawMessage(`{"added":true,"keep":true}`)) || stored.ExternalRef == nil || *stored.ExternalRef != "external" {
 		t.Fatalf("update result aliases store %#v, %v", stored, err)
 	}
-	closed, err := ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: wisp.ID, Metadata: publicops.MetadataPatch{Set: map[string]json.RawMessage{"closed": json.RawMessage(`true`)}}})
+	closed, err := ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: wisp.ID})
 	if err != nil || !closed.Changed || closed.Issue.Status != publicops.StatusClosed {
 		t.Fatalf("wisp close = %#v, %v", closed, err)
 	}
@@ -583,7 +583,7 @@ func TestEmbeddedIssueOperationsPersistenceRollbackWispAndDetachedResults(t *tes
 	}
 	reopened.Issue.Labels[0] = "corrupt"
 	stored, err = te.store.GetIssue(ctx, wisp.ID)
-	if err != nil || strings.Join(stored.Labels, ",") != "added,keep" || !sameEmbeddedMetadataJSON(stored.Metadata, json.RawMessage(`{"added":true,"closed":true,"keep":true}`)) {
+	if err != nil || strings.Join(stored.Labels, ",") != "added,keep" || !sameEmbeddedMetadataJSON(stored.Metadata, json.RawMessage(`{"added":true,"keep":true}`)) {
 		t.Fatalf("lifecycle result aliases store %#v, %v", stored, err)
 	}
 }

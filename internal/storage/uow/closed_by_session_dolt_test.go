@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -28,7 +29,7 @@ func TestIssueOperationsCloseSessionSurvivesAllPersistenceMovesWithRealDolt(t *t
 	}
 	created, err := operations.Create(ctx, issueops.CreateRequest{
 		Actor: "tester",
-		Issue: &issueops.Issue{ID: "bd-close-session", Title: "close provenance", IssueType: issueops.TypeTask, Priority: 2},
+		Issue: &issueops.Issue{ID: "bd-close-session", Title: "close provenance", IssueType: types.TypeTask, Priority: 2},
 	})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)

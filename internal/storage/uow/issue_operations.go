@@ -109,7 +109,6 @@ func createParams(request publicops.CreateRequest) (domain.CreateIssueParams, bo
 		InheritLabelsFromParent: request.InheritLabelsFromParent,
 		ForcePrefix:             request.ForceIDPrefix,
 		CreateOnly:              true,
-		Comments:                request.Comments,
 	}
 	for _, dependency := range request.Dependencies {
 		params.Dependencies = append(params.Dependencies, domain.DependencySpec{
@@ -344,15 +343,6 @@ func (o *issueOperations) Close(ctx context.Context, request publicops.CloseRequ
 		if err != nil {
 			return publicops.CloseResult{}, "", err
 		}
-		if attempt.Metadata.Replace.Set || attempt.Metadata.Merge.Set || len(attempt.Metadata.Set) > 0 || len(attempt.Metadata.Unset) > 0 {
-			spec, err := updateSpec(publicops.UpdateRequest{Patch: publicops.IssuePatch{Metadata: attempt.Metadata}})
-			if err != nil {
-				return publicops.CloseResult{}, "", err
-			}
-			if _, err := uw.IssueUseCase().ApplyUpdate(ctx, attempt.IssueID, spec, attempt.Actor); err != nil {
-				return publicops.CloseResult{}, "", err
-			}
-		}
 		if closed.Issue != nil {
 			issue = closed.Issue
 		}
@@ -449,9 +439,6 @@ func validateUpdateRequest(request publicops.UpdateRequest) error {
 func validateCloseRequest(request publicops.CloseRequest) error {
 	if request.Actor == "" || request.IssueID == "" {
 		return validationError(fmt.Errorf("close: actor and issue ID must not be empty"))
-	}
-	if err := validateMetadataPatch(request.Metadata); err != nil {
-		return validationError(err)
 	}
 	return nil
 }

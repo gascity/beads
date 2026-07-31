@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
@@ -37,11 +36,11 @@ func TestIssueOperationsRejectsInvalidRequestsBeforeOpeningUOW(t *testing.T) {
 			return err
 		}},
 		{"create embedded relations", func() error {
-			_, err := operations.Create(context.Background(), issueops.CreateRequest{Actor: "a", Issue: &issueops.Issue{Comments: []*issueops.Comment{{Text: "no"}}}})
+			_, err := operations.Create(context.Background(), issueops.CreateRequest{Actor: "a", Issue: &issueops.Issue{Comments: []*types.Comment{{Text: "no"}}}})
 			return err
 		}},
 		{"create duplicate dependency", func() error {
-			_, err := operations.Create(context.Background(), issueops.CreateRequest{Actor: "a", Issue: &issueops.Issue{Title: "x"}, ParentID: "bd-parent", Dependencies: []issueops.CreateDependency{{TargetID: "bd-parent", Type: issueops.DepParentChild}}})
+			_, err := operations.Create(context.Background(), issueops.CreateRequest{Actor: "a", Issue: &issueops.Issue{Title: "x"}, ParentID: "bd-parent", Dependencies: []issueops.CreateDependency{{TargetID: "bd-parent", Type: types.DepParentChild}}})
 			return err
 		}},
 		{"create overlong label", func() error {
@@ -52,7 +51,7 @@ func TestIssueOperationsRejectsInvalidRequestsBeforeOpeningUOW(t *testing.T) {
 			_, err := operations.Create(context.Background(), issueops.CreateRequest{
 				Actor:        "a",
 				Issue:        &issueops.Issue{Title: "x"},
-				Dependencies: []issueops.CreateDependency{{TargetID: "bd-target", Type: issueops.DepRelated, Metadata: "{"}},
+				Dependencies: []issueops.CreateDependency{{TargetID: "bd-target", Type: types.DepRelated, Metadata: "{"}},
 			})
 			return err
 		}},
@@ -60,50 +59,7 @@ func TestIssueOperationsRejectsInvalidRequestsBeforeOpeningUOW(t *testing.T) {
 			_, err := operations.Create(context.Background(), issueops.CreateRequest{
 				Actor:        "a",
 				Issue:        &issueops.Issue{Title: "x"},
-				Dependencies: []issueops.CreateDependency{{TargetID: "bd-target", Type: issueops.DepRelated, ThreadID: strings.Repeat("t", types.MaxFieldLen+1)}},
-			})
-			return err
-		}},
-		{"create overlong imported comment ID", func() error {
-			_, err := operations.Create(context.Background(), issueops.CreateRequest{
-				Actor:    "a",
-				Issue:    &issueops.Issue{Title: "x"},
-				Comments: []*issueops.Comment{{ID: strings.Repeat("i", 37), Text: "comment"}},
-			})
-			return err
-		}},
-		{"create overlong imported comment author", func() error {
-			_, err := operations.Create(context.Background(), issueops.CreateRequest{
-				Actor:    "a",
-				Issue:    &issueops.Issue{Title: "x"},
-				Comments: []*issueops.Comment{{Author: strings.Repeat("a", types.MaxFieldLen+1), Text: "comment"}},
-			})
-			return err
-		}},
-		{"create empty imported comment text", func() error {
-			_, err := operations.Create(context.Background(), issueops.CreateRequest{
-				Actor:    "a",
-				Issue:    &issueops.Issue{Title: "x"},
-				Comments: []*issueops.Comment{{}},
-			})
-			return err
-		}},
-		{"create overlong default comment author", func() error {
-			_, err := operations.Create(context.Background(), issueops.CreateRequest{
-				Actor:    strings.Repeat("a", types.MaxFieldLen+1),
-				Issue:    &issueops.Issue{Title: "x"},
-				Comments: []*issueops.Comment{{Text: "comment"}},
-			})
-			return err
-		}},
-		{"create duplicate imported comment ID", func() error {
-			_, err := operations.Create(context.Background(), issueops.CreateRequest{
-				Actor: "a",
-				Issue: &issueops.Issue{Title: "x"},
-				Comments: []*issueops.Comment{
-					{ID: "imported-comment", Text: "first"},
-					{ID: "imported-comment", Text: "second"},
-				},
+				Dependencies: []issueops.CreateDependency{{TargetID: "bd-target", Type: types.DepRelated, ThreadID: strings.Repeat("t", types.MaxFieldLen+1)}},
 			})
 			return err
 		}},
@@ -119,7 +75,7 @@ func TestIssueOperationsRejectsInvalidRequestsBeforeOpeningUOW(t *testing.T) {
 			_, err := operations.Create(context.Background(), issueops.CreateRequest{
 				Actor:        "a",
 				Issue:        &issueops.Issue{Title: "x"},
-				Dependencies: []issueops.CreateDependency{{TargetID: strings.Repeat("d", types.MaxFieldLen+1), Type: issueops.DepRelated}},
+				Dependencies: []issueops.CreateDependency{{TargetID: strings.Repeat("d", types.MaxFieldLen+1), Type: types.DepRelated}},
 			})
 			return err
 		}},
@@ -257,7 +213,7 @@ func TestIssueOperationsCreateRetriesUsingRunTxResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewIssueOperations() error = %v", err)
 	}
-	result, err := operations.Create(context.Background(), issueops.CreateRequest{Actor: "tester", Issue: &issueops.Issue{Title: "retry create", IssueType: issueops.TypeTask, Labels: []string{"caller-label"}}})
+	result, err := operations.Create(context.Background(), issueops.CreateRequest{Actor: "tester", Issue: &issueops.Issue{Title: "retry create", IssueType: types.TypeTask, Labels: []string{"caller-label"}}})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -309,38 +265,29 @@ func TestIssueOperationsLifecycleWithRealUnitOfWork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewIssueOperations() error = %v", err)
 	}
-	target, err := operations.Create(ctx, issueops.CreateRequest{Actor: "tester", Issue: &issueops.Issue{ID: "bd-life-target", Title: "target", IssueType: issueops.TypeTask, Priority: 2}})
+	target, err := operations.Create(ctx, issueops.CreateRequest{Actor: "tester", Issue: &issueops.Issue{ID: "bd-life-target", Title: "target", IssueType: types.TypeTask, Priority: 2}})
 	if err != nil {
 		t.Fatalf("Create(target) error = %v", err)
 	}
 	if target.Issue == nil {
 		t.Fatal("Create(target) returned nil issue")
 	}
-	importedAt := time.Date(2028, time.April, 5, 6, 7, 8, 0, time.UTC)
 	importedIssue := &issueops.Issue{
 		ID:        "bd-life-main",
 		Title:     "main",
-		IssueType: issueops.TypeTask,
+		IssueType: types.TypeTask,
 		Priority:  2,
 		Labels:    []string{"imported-label"},
 	}
-	importedComment := &issueops.Comment{
-		ID:        "imported-comment",
-		IssueID:   "caller-owned-id",
-		Author:    "importer",
-		Text:      "imported note",
-		CreatedAt: importedAt,
-	}
 	importedDependency := issueops.CreateDependency{
 		TargetID: target.Issue.ID,
-		Type:     issueops.DepRelated,
+		Type:     types.DepRelated,
 		Metadata: `{"origin":"import"}`,
 		ThreadID: "import-thread",
 	}
 	created, err := operations.Create(ctx, issueops.CreateRequest{
 		Actor:        "tester",
 		Issue:        importedIssue,
-		Comments:     []*issueops.Comment{importedComment},
 		Dependencies: []issueops.CreateDependency{importedDependency},
 	})
 	if err != nil {
@@ -349,26 +296,14 @@ func TestIssueOperationsLifecycleWithRealUnitOfWork(t *testing.T) {
 	if len(created.Issue.Labels) != 1 || created.Issue.Labels[0] != "imported-label" {
 		t.Fatalf("Create(main) labels = %#v, want imported label", created.Issue.Labels)
 	}
-	if len(created.Issue.Comments) != 1 {
-		t.Fatalf("Create(main) comments = %#v, want one imported comment", created.Issue.Comments)
-	}
-	hydratedComment := created.Issue.Comments[0]
-	if hydratedComment.ID != "imported-comment" ||
-		hydratedComment.IssueID != created.Issue.ID ||
-		hydratedComment.Author != "importer" ||
-		hydratedComment.Text != "imported note" ||
-		!hydratedComment.CreatedAt.Equal(importedAt) {
-		t.Fatalf("Create(main) comment = %#v, want exact imported fields with attached issue ID", hydratedComment)
-	}
 	if len(created.Issue.Dependencies) != 1 ||
 		created.Issue.Dependencies[0].Metadata != `{"origin":"import"}` ||
 		created.Issue.Dependencies[0].ThreadID != "import-thread" {
 		t.Fatalf("Create(main) hydration = %#v", created.Issue)
 	}
 	if importedIssue.Labels[0] != "imported-label" ||
-		importedComment.IssueID != "caller-owned-id" ||
 		importedDependency.Metadata != `{"origin":"import"}` {
-		t.Fatalf("Create(main) mutated caller input: issue=%#v comment=%#v dependency=%#v", importedIssue, importedComment, importedDependency)
+		t.Fatalf("Create(main) mutated caller input: issue=%#v dependency=%#v", importedIssue, importedDependency)
 	}
 
 	beforeGuard := readIssueMutationSnapshot(t, ctx, provider, created.Issue.ID, false)
@@ -464,11 +399,11 @@ func TestIssueOperationsLifecycleWithRealUnitOfWork(t *testing.T) {
 	if stored := readStoredIssue(t, ctx, provider, promoted.Issue.ID); stored.ID != promoted.Issue.ID {
 		t.Fatalf("promoted durable issue = %#v", stored)
 	}
-	parent, err := operations.Create(ctx, issueops.CreateRequest{Actor: "tester", Issue: &issueops.Issue{ID: "bd-life-parent", Title: "parent", IssueType: issueops.TypeEpic, Priority: 2}})
+	parent, err := operations.Create(ctx, issueops.CreateRequest{Actor: "tester", Issue: &issueops.Issue{ID: "bd-life-parent", Title: "parent", IssueType: types.TypeEpic, Priority: 2}})
 	if err != nil {
 		t.Fatalf("Create(parent) error = %v", err)
 	}
-	child, err := operations.Create(ctx, issueops.CreateRequest{Actor: "tester", Issue: &issueops.Issue{ID: "bd-life-parent.1", Title: "child", IssueType: issueops.TypeTask, Priority: 2}, ParentID: parent.Issue.ID})
+	child, err := operations.Create(ctx, issueops.CreateRequest{Actor: "tester", Issue: &issueops.Issue{ID: "bd-life-parent.1", Title: "child", IssueType: types.TypeTask, Priority: 2}, ParentID: parent.Issue.ID})
 	if err != nil {
 		t.Fatalf("Create(child) error = %v", err)
 	}
@@ -490,7 +425,7 @@ func TestIssueOperationsLifecycleWithRealUnitOfWork(t *testing.T) {
 	if movedClosedChild.Issue.ClosedBySession != "session-life-child" {
 		t.Fatalf("Update(closed child persistence) ClosedBySession = %q, want session-life-child", movedClosedChild.Issue.ClosedBySession)
 	}
-	closedParent, err := operations.Close(ctx, issueops.CloseRequest{Actor: "tester", IssueID: parent.Issue.ID, ExpectedVersion: &parent.Issue.RowVersion, Metadata: issueops.MetadataPatch{Replace: issueops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"closed":true}`)}}})
+	closedParent, err := operations.Close(ctx, issueops.CloseRequest{Actor: "tester", IssueID: parent.Issue.ID, ExpectedVersion: &parent.Issue.RowVersion})
 	if err != nil || !closedParent.Changed {
 		t.Fatalf("Close(parent) = %#v, %v", closedParent, err)
 	}
@@ -511,32 +446,28 @@ func TestIssueOperationsLifecycleWithRealUnitOfWork(t *testing.T) {
 	rollbackIssue := &issueops.Issue{
 		ID:        "bd-life-rollback",
 		Title:     "rollback",
-		IssueType: issueops.TypeTask,
+		IssueType: types.TypeTask,
 		Priority:  2,
 		Labels:    []string{"rollback-label"},
 	}
-	rollbackComment := &issueops.Comment{IssueID: "caller-rollback-id", Text: "must roll back"}
 	rollbackDependency := issueops.CreateDependency{
 		TargetID: "bd-life-missing",
-		Type:     issueops.DepRelated,
+		Type:     types.DepRelated,
 		Metadata: `{"rollback":true}`,
 		ThreadID: "rollback-thread",
 	}
 	_, err = operations.Create(ctx, issueops.CreateRequest{
 		Actor:        "tester",
 		Issue:        rollbackIssue,
-		Comments:     []*issueops.Comment{rollbackComment},
 		Dependencies: []issueops.CreateDependency{rollbackDependency},
 	})
 	if err == nil {
 		t.Fatal("Create(rollback) error = nil, want dependency failure")
 	}
 	if rollbackIssue.Labels[0] != "rollback-label" ||
-		rollbackComment.IssueID != "caller-rollback-id" ||
-		rollbackComment.Author != "" ||
 		rollbackDependency.Metadata != `{"rollback":true}` ||
 		rollbackDependency.ThreadID != "rollback-thread" {
-		t.Fatalf("Create(rollback) mutated caller input: issue=%#v comment=%#v dependency=%#v", rollbackIssue, rollbackComment, rollbackDependency)
+		t.Fatalf("Create(rollback) mutated caller input: issue=%#v dependency=%#v", rollbackIssue, rollbackDependency)
 	}
 	_, err = RunTxRead(ctx, provider, func(ctx context.Context, uw UnitOfWork) (struct{}, error) {
 		_, err := uw.IssueUseCase().GetIssue(ctx, "bd-life-rollback")
@@ -656,7 +587,7 @@ func TestIssueOperationsCreateRejectsIncompleteUnitOfWork(t *testing.T) {
 		}
 		_, err = operations.Create(context.Background(), issueops.CreateRequest{
 			Actor: "tester",
-			Issue: &issueops.Issue{ID: "bd-incomplete-labels", Title: "missing labels", IssueType: issueops.TypeTask},
+			Issue: &issueops.Issue{ID: "bd-incomplete-labels", Title: "missing labels", IssueType: types.TypeTask},
 		})
 		if err == nil || !strings.Contains(err.Error(), "hydrate issue labels") {
 			t.Fatalf("Create() error = %v, want missing-label capability context", err)
@@ -679,7 +610,7 @@ func TestIssueOperationsCreateRejectsIncompleteUnitOfWork(t *testing.T) {
 		}
 		_, err = operations.Create(context.Background(), issueops.CreateRequest{
 			Actor: "tester",
-			Issue: &issueops.Issue{ID: "bd-incomplete-dependencies", Title: "missing dependencies", IssueType: issueops.TypeTask},
+			Issue: &issueops.Issue{ID: "bd-incomplete-dependencies", Title: "missing dependencies", IssueType: types.TypeTask},
 		})
 		if err == nil || !strings.Contains(err.Error(), "hydrate issue dependencies") {
 			t.Fatalf("Create() error = %v, want missing-dependency capability context", err)
@@ -702,7 +633,7 @@ func TestIssueOperationsCreateRejectsIncompleteUnitOfWork(t *testing.T) {
 		}
 		_, err = operations.Create(context.Background(), issueops.CreateRequest{
 			Actor: "tester",
-			Issue: &issueops.Issue{ID: "bd-incomplete-comments", Title: "missing comments", IssueType: issueops.TypeTask},
+			Issue: &issueops.Issue{ID: "bd-incomplete-comments", Title: "missing comments", IssueType: types.TypeTask},
 		})
 		if err == nil || !strings.Contains(err.Error(), "hydrate issue comments") {
 			t.Fatalf("Create() error = %v, want missing-comment capability context", err)
@@ -931,7 +862,7 @@ func TestIssueOperationsCreateRetriesOnSerializationSQLStates(t *testing.T) {
 
 			result, err := operations.Create(context.Background(), issueops.CreateRequest{
 				Actor: "tester",
-				Issue: &issueops.Issue{Title: "retry create", IssueType: issueops.TypeTask, Labels: []string{"caller-label"}},
+				Issue: &issueops.Issue{Title: "retry create", IssueType: types.TypeTask, Labels: []string{"caller-label"}},
 			})
 			if err != nil {
 				t.Fatalf("Create() error = %v", err)
