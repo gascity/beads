@@ -206,10 +206,10 @@ func RunIssueOperationsUpdateFoldsMetadataIntoOneEvent(t *testing.T, ctx context
 }
 
 // RunIssueOperationsUpdateClosePolicy pins what a generic status update does
-// when it crosses from a non-done status into the done category. `bd close`
-// refuses an issue that still has open parent-child children or a live direct
-// blocker; this case records whether the generic update path applies the same
-// policy. Until now the contract had no boundary-crossing case at all, and that
+// when it crosses from a non-done status into the done category: it answers to
+// the same policy `bd close` does — the open-children refusal and the
+// live-direct-blocker refusal — and ForceClosePolicy is how a caller overrides
+// them. Until now the contract had no boundary-crossing case at all, and that
 // gap is exactly how two earlier attempts at a shared policy check reached a
 // backend that could not satisfy them without any test noticing.
 func RunIssueOperationsUpdateClosePolicy(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
@@ -226,43 +226,88 @@ func RunIssueOperationsUpdateClosePolicy(t *testing.T, ctx context.Context, fixt
 		Dependencies: []publicops.CreateDependency{{TargetID: blockerID, Type: types.DepBlocks}},
 	})
 
-	// CHARACTERIZATION: today a generic status update carries the close EFFECTS
-	// (closed_at, the closed event) but none of the close POLICY, so both
-	// refusals that `bd close` raises are silently skipped here.
-	openChildren, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(parentID))
-	if err != nil {
-		t.Fatalf("update %s into done with an open child: %v", parentID, err)
+	// An open child refuses, with the typed error and its count, and writes
+	// nothing — not the row, not an event.
+	events := newIssueOperationsEventCounter(t, ctx, fixture, parentID)
+	var openChildrenErr *publicops.CloseOpenChildrenError
+	_, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(parentID, false))
+	if !errors.As(err, &openChildrenErr) {
+		t.Fatalf("update %s into done with an open child: err = %v, want CloseOpenChildrenError", parentID, err)
 	}
-	if !openChildren.Changed || openChildren.Issue.Status != types.StatusClosed {
-		t.Fatalf("update %s into done = %#v, want a committed close", parentID, openChildren)
+	if openChildrenErr.OpenChildren != 1 {
+		t.Errorf("refusal reported %d open children, want 1", openChildrenErr.OpenChildren)
 	}
+	assertClosePolicyStatus(t, ctx, fixture, parentID, types.StatusOpen)
+	events.assert(t, "refused crossing", 0, nil)
 
-	liveBlocker, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(blockedID))
-	if err != nil {
-		t.Fatalf("update %s into done with a live blocker: %v", blockedID, err)
+	// A live direct blocker refuses too.
+	_, err = fixture.Operations.Update(ctx, closePolicyStatusRequest(blockedID, false))
+	if !errors.Is(err, publicops.ErrCloseBlocked) {
+		t.Fatalf("update %s into done with a live blocker: err = %v, want ErrCloseBlocked", blockedID, err)
 	}
-	if !liveBlocker.Changed || liveBlocker.Issue.Status != types.StatusClosed {
-		t.Fatalf("update %s into done = %#v, want a committed close", blockedID, liveBlocker)
+	assertClosePolicyStatus(t, ctx, fixture, blockedID, types.StatusOpen)
+
+	// Force bypasses close policy and nothing else. A stale ExpectedVersion is
+	// an orthogonal precondition, checked ahead of the policy and never waived
+	// by it — the same ordering a checked close applies.
+	stale := int64(-1)
+	staleRequest := closePolicyStatusRequest(parentID, true)
+	staleRequest.ExpectedVersion = &stale
+	if _, err := fixture.Operations.Update(ctx, staleRequest); !errors.Is(err, publicops.ErrVersionMismatch) {
+		t.Fatalf("forced crossing with a stale version: err = %v, want ErrVersionMismatch", err)
+	}
+	assertClosePolicyStatus(t, ctx, fixture, parentID, types.StatusOpen)
+
+	// ForceClosePolicy bypasses both, and only those.
+	for _, id := range []string{parentID, blockedID} {
+		forced, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(id, true))
+		if err != nil {
+			t.Fatalf("forced update %s into done: %v", id, err)
+		}
+		if !forced.Changed || forced.Issue.Status != types.StatusClosed {
+			t.Fatalf("forced update %s into done = %#v, want a committed close", id, forced)
+		}
 	}
 
 	// A done-to-done restatement is filtered out as a no-op before any policy
-	// could observe it, so it stays free of both refusals either way.
-	reclose, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(parentID))
+	// could observe it, so it needs no force even though the child is still open.
+	reclose, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(parentID, false))
 	if err != nil {
 		t.Fatalf("restate %s as done: %v", parentID, err)
 	}
 	if reclose.Changed {
 		t.Errorf("restating %s as done reported Changed = true, want a no-op", parentID)
 	}
+
+	// A status change that does not reach the done category is untouched by any
+	// of this, open child or not.
+	nonCrossing := closePolicyStatusRequest(parentID, false)
+	nonCrossing.Patch.Status.Value = types.StatusInProgress
+	if _, err := fixture.Operations.Update(ctx, nonCrossing); err != nil {
+		t.Fatalf("non-crossing status update on %s: %v", parentID, err)
+	}
+	assertClosePolicyStatus(t, ctx, fixture, parentID, types.StatusInProgress)
 }
 
 // closePolicyStatusRequest builds the generic status update that crosses into
 // the done category — the operation whose policy this case pins.
-func closePolicyStatusRequest(id string) publicops.UpdateRequest {
+func closePolicyStatusRequest(id string, force bool) publicops.UpdateRequest {
 	return publicops.UpdateRequest{
-		Actor:   "writer",
-		IssueID: id,
-		Patch:   publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusClosed}},
+		Actor:            "writer",
+		IssueID:          id,
+		ForceClosePolicy: force,
+		Patch:            publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusClosed}},
+	}
+}
+
+func assertClosePolicyStatus(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id string, want types.Status) {
+	t.Helper()
+	var got string
+	if err := fixture.QueryScalar(ctx, "SELECT status FROM issues WHERE id = ?", []any{id}, &got); err != nil {
+		t.Fatalf("read status for %s: %v", id, err)
+	}
+	if types.Status(got) != want {
+		t.Errorf("%s status = %q, want %q", id, got, want)
 	}
 }
 

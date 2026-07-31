@@ -239,7 +239,7 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// has to come out ahead of the no-op filter too: the filter keeps every key
 	// it does not recognize, so a surviving override would reach the field
 	// allowlist and be refused by name.
-	_ = PopForceClosePolicy(updates)
+	forceClosePolicy := PopForceClosePolicy(updates)
 
 	// Route to correct table.
 	isWisp := IsActiveWispInTx(ctx, tx, id)
@@ -265,6 +265,23 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	}
 	if len(updates) == 0 {
 		return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: false}, nil
+	}
+
+	// A status update that crosses into the done category is a close by another
+	// name, so it answers to close policy. Running after the no-op filter keeps
+	// a done-to-done restatement policy-free, and running after the callers'
+	// version and assignee preconditions keeps force away from those: it
+	// bypasses the two close refusals and nothing else, exactly as it does for
+	// `bd close`. A refusal returns here, before any write, and aborts the
+	// caller's transaction.
+	crossing, err := CrossesIntoDoneCategoryInTx(ctx, tx, oldIssue.Status, updates)
+	if err != nil {
+		return nil, err
+	}
+	if crossing {
+		if _, err := EnforceClosePolicyInTx(ctx, tx, id, forceClosePolicy); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := ValidateScalarUpdates(ctx, tx, updates); err != nil {

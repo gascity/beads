@@ -183,6 +183,57 @@ func TestEnforceClosePolicyInTxRoutesDualResidentToDurableRow(t *testing.T) {
 	}
 }
 
+// TestUpdateIssueEnforcesClosePolicyForConfiguredDoneStatus proves the gate
+// really is category-driven end to end, not a check for the literal string
+// "closed". A project that configures its own done status gets the same
+// refusal, and the same override, on the way into it.
+func TestUpdateIssueEnforcesClosePolicyForConfiguredDoneStatus(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "status.custom", "archived:done"); err != nil {
+		t.Fatalf("SetConfig(status.custom): %v", err)
+	}
+
+	const parent, child = "cds-parent", "cds-child"
+	createPerm(t, ctx, store, parent)
+	createPerm(t, ctx, store, child)
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+	}, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+
+	err := store.UpdateIssue(ctx, parent, map[string]interface{}{"status": "archived"}, "tester")
+	if !errors.Is(err, storage.ErrCloseOpenChildren) {
+		t.Fatalf("update into a configured done status: err = %v, want ErrCloseOpenChildren", err)
+	}
+	if got := getClosePolicyStatus(t, ctx, store, parent); got != types.StatusOpen {
+		t.Errorf("%s status = %q after a refusal, want open", parent, got)
+	}
+
+	if err := store.UpdateIssue(ctx, parent, map[string]interface{}{
+		"status":                    "archived",
+		issueops.OpForceClosePolicy: true,
+	}, "tester"); err != nil {
+		t.Fatalf("forced update into a configured done status: %v", err)
+	}
+	if got := getClosePolicyStatus(t, ctx, store, parent); got != types.Status("archived") {
+		t.Errorf("%s status = %q, want archived", parent, got)
+	}
+}
+
+func getClosePolicyStatus(t *testing.T, ctx context.Context, store *DoltStore, id string) types.Status {
+	t.Helper()
+	issue, err := store.GetIssue(ctx, id)
+	if err != nil {
+		t.Fatalf("GetIssue(%s): %v", id, err)
+	}
+	return issue.Status
+}
+
 // TestCrossesIntoDoneCategoryInTx pins the trigger for the gate. It fires on a
 // move INTO the done category from outside it — for a configured done status
 // exactly as for the built-in closed — and on nothing else.

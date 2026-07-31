@@ -4,10 +4,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -55,30 +57,103 @@ func TestUpdateClosePolicyDirectCrossesIntoDone(t *testing.T) {
 	env := newParityEnv(t)
 	parentID, blockedID := seedClosePolicyFixture(t, env, "test-ucp")
 
-	// CHARACTERIZATION: an open child does not stop the crossing.
+	// An open child refuses, names the count, and writes nothing.
 	env.setFlags(updateCmd, map[string]string{"status": "closed"})
 	res := env.run(updateCmd, parentID)
-	if res.exitCode != 0 {
-		t.Fatalf("update %s into done: exit = %d, want 0\nstderr:\n%s", parentID, res.exitCode, res.stderr)
+	if res.exitCode != 1 {
+		t.Fatalf("update %s into done: exit = %d, want 1\nstderr:\n%s", parentID, res.exitCode, res.stderr)
 	}
-	if got := env.get(parentID).Status; got != types.StatusClosed {
-		t.Errorf("%s status = %q, want closed", parentID, got)
+	if !strings.Contains(res.stderr, "1 open child issue(s)") {
+		t.Errorf("stderr lacks the open-children refusal:\n%s", res.stderr)
+	}
+	if got := env.get(parentID).Status; got != types.StatusOpen {
+		t.Errorf("%s status = %q after a refusal, want open", parentID, got)
 	}
 
-	// CHARACTERIZATION: neither does a live direct blocker.
+	// A live direct blocker refuses too.
 	res = env.run(updateCmd, blockedID)
-	if res.exitCode != 0 {
-		t.Fatalf("update %s into done: exit = %d, want 0\nstderr:\n%s", blockedID, res.exitCode, res.stderr)
+	if res.exitCode != 1 {
+		t.Fatalf("update %s into done: exit = %d, want 1\nstderr:\n%s", blockedID, res.exitCode, res.stderr)
 	}
-	if got := env.get(blockedID).Status; got != types.StatusClosed {
-		t.Errorf("%s status = %q, want closed", blockedID, got)
+	if !strings.Contains(res.stderr, "blocked by") {
+		t.Errorf("stderr lacks the blocker refusal:\n%s", res.stderr)
+	}
+	if got := env.get(blockedID).Status; got != types.StatusOpen {
+		t.Errorf("%s status = %q after a refusal, want open", blockedID, got)
+	}
+
+	// --force overrides both.
+	env.setFlags(updateCmd, map[string]string{"status": "closed", "force": "true"})
+	for _, id := range []string{parentID, blockedID} {
+		if res := env.run(updateCmd, id); res.exitCode != 0 {
+			t.Fatalf("forced update %s into done: exit = %d\nstderr:\n%s", id, res.exitCode, res.stderr)
+		}
+		if got := env.get(id).Status; got != types.StatusClosed {
+			t.Errorf("%s status = %q after --force, want closed", id, got)
+		}
 	}
 
 	// A done-to-done restatement is filtered out as a no-op before any policy
-	// could observe it.
-	res = env.run(updateCmd, parentID)
-	if res.exitCode != 0 {
+	// could observe it, so it needs no force despite the still-open child.
+	env.setFlags(updateCmd, map[string]string{"status": "closed"})
+	if res := env.run(updateCmd, parentID); res.exitCode != 0 {
 		t.Fatalf("restate %s as done: exit = %d, want 0\nstderr:\n%s", parentID, res.exitCode, res.stderr)
+	}
+}
+
+// TestUpdateClosePolicyDirectRefusalIsInert pins what a refusal costs. Nothing
+// about the issue may move — not the row, not its event stream, not a claim
+// riding the same request — and no hook may fire, because the parity harness
+// counts one facade mutation per hook production would run.
+func TestUpdateClosePolicyDirectRefusalIsInert(t *testing.T) {
+	env := newParityEnv(t)
+	parentID, _ := seedClosePolicyFixture(t, env, "test-ucpi")
+
+	beforeEvents := len(env.eventTypes(parentID))
+	before := env.get(parentID)
+
+	// The claim rides the same request, so a refusal must take it down too.
+	env.setFlags(updateCmd, map[string]string{"status": "closed", "claim": "true"})
+	res := env.run(updateCmd, parentID)
+	if res.exitCode != 1 {
+		t.Fatalf("exit = %d, want 1\nstderr:\n%s", res.exitCode, res.stderr)
+	}
+
+	after := env.get(parentID)
+	if after.Status != before.Status || after.Assignee != before.Assignee || after.RowVersion != before.RowVersion {
+		t.Errorf("refusal moved the row: %+v -> %+v", before, after)
+	}
+	if after.ClosedAt != nil {
+		t.Error("refusal stamped closed_at")
+	}
+	if got := len(env.eventTypes(parentID)); got != beforeEvents {
+		t.Errorf("refusal wrote %d events, want 0", got-beforeEvents)
+	}
+	if got := env.store.mutations(); len(got) != 0 {
+		t.Errorf("refusal made %v store mutations, want none (each would fire a hook)", got)
+	}
+}
+
+// TestUpdateClosePolicyDirectForcedCrossingStaysAnUpdate keeps the change
+// scoped to policy. A forced crossing is still an update, not a close: it
+// records the status-change event stream an update records, and never the
+// close verb's own.
+func TestUpdateClosePolicyDirectForcedCrossingStaysAnUpdate(t *testing.T) {
+	env := newParityEnv(t)
+	parentID, _ := seedClosePolicyFixture(t, env, "test-ucpu")
+	before := len(env.eventTypes(parentID))
+
+	env.setFlags(updateCmd, map[string]string{"status": "closed", "force": "true"})
+	if res := env.run(updateCmd, parentID); res.exitCode != 0 {
+		t.Fatalf("forced crossing: exit = %d\nstderr:\n%s", res.exitCode, res.stderr)
+	}
+
+	if got := env.store.mutations(); len(got) != 1 || got[0] != "Update" {
+		t.Errorf("store mutations = %v, want exactly one Update (never a Close)", got)
+	}
+	added := env.eventTypes(parentID)[before:]
+	if len(added) != 1 {
+		t.Fatalf("forced crossing wrote %v, want one event", added)
 	}
 }
 
@@ -151,10 +226,33 @@ func TestUpdateClosePolicyBatchCrossesIntoDone(t *testing.T) {
 		}
 	}
 
-	// CHARACTERIZATION: the batch grammar crosses both boundaries unimpeded.
-	script := "update tbc-parent status=closed\nupdate tbc-blocked status=closed\n"
-	if err := runBatchScriptInTx(t, ctx, st, script); err != nil {
-		t.Fatalf("batch update into done: %v", err)
+	// An unforced crossing refuses — and because the batch is one transaction,
+	// it takes the WHOLE batch down, including the priority edit on a line that
+	// had nothing to do with the refusal. That is the documented contract.
+	script := "update tbc-blocker priority=0\nupdate tbc-parent status=closed\n"
+	err := runBatchScriptInTx(t, ctx, st, script)
+	if err == nil {
+		t.Fatal("batch update into done with an open child succeeded, want a refusal")
+	}
+	if !errors.Is(err, storage.ErrCloseOpenChildren) {
+		t.Errorf("batch error = %v, want ErrCloseOpenChildren", err)
+	}
+	rolledBack, getErr := st.GetIssue(ctx, "tbc-blocker")
+	if getErr != nil {
+		t.Fatalf("GetIssue tbc-blocker: %v", getErr)
+	}
+	if rolledBack.Priority != 2 {
+		t.Errorf("tbc-blocker priority = %d; an unforced refusal must roll back the whole batch", rolledBack.Priority)
+	}
+
+	if err := runBatchScriptInTx(t, ctx, st, "update tbc-blocked status=closed\n"); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Errorf("batch error = %v, want ErrCloseBlocked", err)
+	}
+
+	// force=true overrides both, in the same one transaction.
+	forced := "update tbc-parent status=closed force=true\nupdate tbc-blocked status=closed force=true\n"
+	if err := runBatchScriptInTx(t, ctx, st, forced); err != nil {
+		t.Fatalf("forced batch update into done: %v", err)
 	}
 	for _, id := range []string{"tbc-parent", "tbc-blocked"} {
 		got, err := st.GetIssue(ctx, id)
