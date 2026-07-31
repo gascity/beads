@@ -302,10 +302,10 @@ func TestUpdateClosePolicyBatchGrammarForceToken(t *testing.T) {
 }
 
 // TestUpdateClosePolicyProxiedSpecCarriesForce pins the proxied path's
-// translation of `--force`. This is the exact mapping whose absence was
-// reverted in 11382270b: the proxied caller built a spec that never carried
-// the override, so a shared policy check refused it with no way to say
-// otherwise. The spec must carry it, and must not invent it.
+// translation of `--force`. An earlier attempt was reverted for exactly this
+// missing mapping: the proxied caller built a spec that never carried the
+// override, so a shared policy check refused the close with no way for the
+// user to say otherwise. The spec must carry it, and must not invent it.
 func TestUpdateClosePolicyProxiedSpecCarriesForce(t *testing.T) {
 	current := &types.Issue{ID: "test-ucpp", Status: types.StatusOpen}
 

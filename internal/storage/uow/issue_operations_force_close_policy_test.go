@@ -10,9 +10,9 @@ import (
 
 // TestUpdateSpecCarriesForceClosePolicy pins the unit-of-work backend's
 // translation of the typed override into the update map. This backend reaches
-// storage by a path the other two do not, and a mapping dropped exactly here is
-// what 11382270b reverted: the request carried the override, the spec did not,
-// and the caller's force was lost without a sound.
+// storage by a path the other two do not, and an earlier attempt was reverted
+// for exactly this: the request carried the override, the spec did not, and the
+// caller's force was lost silently.
 func TestUpdateSpecCarriesForceClosePolicy(t *testing.T) {
 	t.Parallel()
 
