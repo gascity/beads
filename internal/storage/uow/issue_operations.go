@@ -66,6 +66,15 @@ func (o *issueOperations) Create(ctx context.Context, request publicops.CreateRe
 		if err != nil {
 			return publicops.CreateResult{}, "", err
 		}
+		// Configured infra types live in the wisp tables, the same routing the
+		// stores' own CreateIssue applies (internal/storage/dolt/issues.go) and
+		// the public facade applies in issueops.ExecuteCreate. Mark the issue
+		// before createParams reads it so ID minting and table routing agree on
+		// the destination. A no-history create keeps its own retention mode and
+		// already routes to wisps.
+		if attempt.Issue != nil && !attempt.Issue.Ephemeral && !attempt.Issue.NoHistory && createContext.InfraTypes[string(attempt.Issue.IssueType)] {
+			attempt.Issue.Ephemeral = true
+		}
 		params, useWisp, err := createParams(attempt)
 		if err != nil {
 			return publicops.CreateResult{}, "", validationError(err)
