@@ -35,7 +35,6 @@ func (s *testSuite) TestIssueUseCase_ApplyUpdate() {
 	s.Run("WispIDDispatchesToWispTables", s.iucApplyUpdateDispatchesToWisp)
 	s.Run("ClaimAgainstWispDispatches", s.iucClaimDispatchesToWisp)
 	s.Run("ExpectedVersionRefusesStaleWrite", s.iucApplyUpdateExpectedVersion)
-	s.Run("ForeignInProgressAssigneeRequiresForce", s.iucApplyUpdateAssigneeTransferFence)
 	s.Run("PersistenceMovesNoOpsAndRollsBack", s.iucApplyUpdatePersistence)
 }
 
@@ -269,51 +268,6 @@ func (s *testSuite) iucApplyUpdateExpectedVersion() {
 	stored, err := s.issueUseCase().GetIssue(s.Ctx(), "bd-iuc-au-version")
 	s.Require().NoError(err)
 	s.Equal("seed", stored.Title)
-}
-
-func (s *testSuite) iucApplyUpdateAssigneeTransferFence() {
-	s.seedOpenIssue("bd-iuc-au-transfer")
-	s.Require().NoError(s.issueRepo().Update(s.Ctx(), "bd-iuc-au-transfer", map[string]any{
-		"assignee": "alice",
-		"status":   string(types.StatusInProgress),
-	}, "seeder", domain.IssueTableOpts{}))
-
-	_, err := s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-transfer", domain.UpdateSpec{
-		Fields: map[string]any{"assignee": "bob"},
-	}, "bob")
-	s.Require().Error(err)
-	s.True(errors.Is(err, storage.ErrAlreadyClaimed), "want ErrAlreadyClaimed, got %v", err)
-
-	updated, err := s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-transfer", domain.UpdateSpec{
-		Fields:                map[string]any{"assignee": "bob"},
-		ForceAssigneeTransfer: true,
-	}, "bob")
-	s.Require().NoError(err)
-	s.Equal("bob", updated.Assignee)
-
-	s.seedOpenIssue("bd-iuc-au-transfer-pool")
-	s.Require().NoError(NewConfigSQLRepository(s.Runner()).SetConfig(s.Ctx(), "claim.pools", "dispatch-pool"))
-	s.Require().NoError(s.issueRepo().Update(s.Ctx(), "bd-iuc-au-transfer-pool", map[string]any{
-		"assignee": "dispatch-pool",
-		"status":   string(types.StatusInProgress),
-	}, "seeder", domain.IssueTableOpts{}))
-	updated, err = s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-transfer-pool", domain.UpdateSpec{
-		Fields: map[string]any{"assignee": "bob"},
-	}, "bob")
-	s.Require().NoError(err)
-	s.Equal("bob", updated.Assignee)
-
-	s.seedOpenIssue("bd-iuc-au-transfer-own")
-	s.Require().NoError(s.issueRepo().Update(s.Ctx(), "bd-iuc-au-transfer-own", map[string]any{
-		"assignee": "alice",
-		"status":   string(types.StatusInProgress),
-	}, "seeder", domain.IssueTableOpts{}))
-	updated, err = s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-transfer-own", domain.UpdateSpec{
-		Claim:  true,
-		Fields: map[string]any{"assignee": "bob"},
-	}, "alice")
-	s.Require().NoError(err)
-	s.Equal("bob", updated.Assignee)
 }
 
 func (s *testSuite) iucApplyUpdatePersistence() {

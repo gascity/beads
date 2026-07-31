@@ -239,9 +239,6 @@ type ClaimReadyResult struct {
 type UpdateSpec struct {
 	Fields map[string]any
 	Claim  bool
-	// ForceAssigneeTransfer permits an explicit reassignment away from a
-	// different live in-progress owner. It does not bypass any other guard.
-	ForceAssigneeTransfer bool
 	// ExpectedVersion requires the current row version to match before any
 	// claim or field writes.
 	ExpectedVersion *int64
@@ -584,9 +581,7 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		return nil, fmt.Errorf("ApplyUpdate %s: %w", id, err)
 	}
 
-	requestedAssignee, assignsAssignee := spec.Fields["assignee"].(string)
-	needsCurrent := spec.ExpectedVersion != nil || spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil || assignsAssignee
-	if needsCurrent {
+	if spec.ExpectedVersion != nil || spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil {
 		var current *types.Issue
 		if useWisp {
 			current, err = u.GetWisp(ctx, id)
@@ -609,22 +604,6 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		if spec.ExpectedStatus != nil && string(current.Status) != *spec.ExpectedStatus {
 			return nil, fmt.Errorf("%w: %s has status %q, expected %q",
 				storage.ErrStatusMismatch, id, current.Status, *spec.ExpectedStatus)
-		}
-		if assignsAssignee && current.Status == types.StatusInProgress && current.Assignee != "" && current.Assignee != requestedAssignee && current.Assignee != actor && spec.ExpectedAssignee == nil {
-			claimPools, err := u.cfgRepo.GetConfig(ctx, "claim.pools")
-			if err != nil {
-				return nil, fmt.Errorf("ApplyUpdate: read claim pools: %w", err)
-			}
-			isPool := false
-			for _, pool := range strings.Split(claimPools, ",") {
-				if strings.TrimSpace(pool) == current.Assignee {
-					isPool = true
-					break
-				}
-			}
-			if !isPool && !spec.ForceAssigneeTransfer {
-				return nil, fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, current.Assignee)
-			}
 		}
 	}
 
