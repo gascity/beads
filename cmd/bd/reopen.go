@@ -37,6 +37,10 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 
 		reason, _ := cmd.Flags().GetString("reason")
 		ctx := rootCtx
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 
 		reopenedIssues := []*types.Issue{}
 		hasError := false
@@ -69,7 +73,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 				result.Close()
 				continue
 			}
-			reopened, err := ops.Reopen(ctx, issueops.ReopenRequest{
+			reopened, err := ops.Reopen(opsCtx, issueops.ReopenRequest{
 				Actor:   actor,
 				IssueID: fullID,
 				Reason:  reason,

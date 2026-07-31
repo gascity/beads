@@ -577,10 +577,14 @@ var createCmd = &cobra.Command{
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 		// Label inheritance stays CLI-side (mergeCreateLabels above) because the
 		// dry-run preview needs it too; asking the facade to inherit as well
 		// would append the parent's labels a second time.
-		result, err := ops.Create(ctx, issueops.CreateRequest{
+		result, err := ops.Create(opsCtx, issueops.CreateRequest{
 			Actor:         actor,
 			Issue:         issue,
 			ParentID:      parentID,
@@ -821,17 +825,7 @@ func renderCreateDryRunPreview(issue *types.Issue, labels, deps []string) {
 }
 
 func shouldCommitCreatePostWrites(_ *types.Issue, _ bool) (bool, error) {
-	if isEmbeddedMode() {
-		if strings.TrimSpace(doltAutoCommit) == "" {
-			return true, nil
-		}
-		mode, err := getDoltAutoCommitMode()
-		if err != nil {
-			return false, err
-		}
-		return mode == doltAutoCommitOn, nil
-	}
-	return false, nil
+	return embeddedWritesCommitNow()
 }
 
 func createDepsAcceptedTypeList() string {

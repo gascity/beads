@@ -365,6 +365,10 @@ pointless).`,
 		}
 
 		ctx := rootCtx
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 
 		updatedIssues := []*types.Issue{}
 		var firstUpdatedID string // Track first successful update for last-touched
@@ -476,7 +480,7 @@ pointless).`,
 			// Guards ride the operation itself: a stale assignee/status refuses
 			// atomically with a typed mismatch error and MUST surface as a
 			// non-zero exit — never collapse it to success (finding #10).
-			updatedIssue, updateErr := applyUpdateWithLifecycle(ctx, ops, issueops.UpdateRequest{
+			updatedIssue, updateErr := applyUpdateWithLifecycle(opsCtx, ops, issueops.UpdateRequest{
 				Actor:                 actor,
 				IssueID:               result.ResolvedID,
 				Patch:                 patch,

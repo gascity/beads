@@ -82,6 +82,10 @@ the flags appear in the command line.`,
 		}
 
 		ctx := rootCtx
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 
 		if continueFlag && len(args) > 1 {
 			return HandleErrorRespectJSON("--continue only works when closing a single issue")
@@ -155,7 +159,7 @@ the flags appear in the command line.`,
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 				continue
 			}
-			res, err := ops.Close(ctx, issueops.CloseRequest{
+			res, err := ops.Close(opsCtx, issueops.CloseRequest{
 				Actor:   actor,
 				IssueID: id,
 				Reason:  reason,
