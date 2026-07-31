@@ -748,6 +748,16 @@ func parseSetMetadataFlags(flags []string) (map[string]json.RawMessage, error) {
 // replays it (internal/tracker/engine.go): the non-status edits first, then
 // the lifecycle operation the direction selects, then the target status when
 // it is neither closed nor open.
+//
+// Replaying one request as several transactions would cost a compare-and-set
+// request its atomicity: the guard is evaluated in the replayed update, and
+// without a fence any writer could move the row before the lifecycle operation
+// ran against it — a `bd update --if-status open --status closed` would close a
+// row whose precondition had already evaporated. So when the request carries a
+// precondition, every step after the guard pins the row version the previous
+// step left behind (fenceVersion), which fails the transition instead of
+// applying it. The unguarded spelling is deliberately left unpinned: it never
+// had a check to be atomic with, and pinning it would invent a failure mode.
 func applyUpdateWithLifecycle(ctx context.Context, ops issueops.Operations, request issueops.UpdateRequest, hasNonStatusEdit bool, session string) (*types.Issue, error) {
 	result, err := ops.Update(ctx, request)
 	var boundary *storageissueops.ClosedBoundaryError
@@ -758,12 +768,21 @@ func applyUpdateWithLifecycle(ctx context.Context, ops issueops.Operations, requ
 
 	rest := request
 	rest.Patch.Status = issueops.Field[issueops.Status]{}
+	guarded := rest.ExpectedAssignee != nil || rest.ExpectedStatus != nil || rest.ExpectedVersion != nil
+	var version *int64
 	// The guards are preconditions on the whole request, so they must still be
 	// checked even when nothing but the status was requested.
-	if hasNonStatusEdit || rest.Claim || rest.ExpectedAssignee != nil || rest.ExpectedStatus != nil || rest.ExpectedVersion != nil {
+	if hasNonStatusEdit || rest.Claim || guarded {
 		restResult, restErr := ops.Update(ctx, rest)
 		if restErr != nil {
 			return restResult.Issue, restErr
+		}
+		if guarded {
+			fenced, fenceErr := fenceVersion(request.IssueID, restResult.Issue)
+			if fenceErr != nil {
+				return nil, fenceErr
+			}
+			version = fenced
 		}
 	}
 
@@ -771,21 +790,23 @@ func applyUpdateWithLifecycle(ctx context.Context, ops issueops.Operations, requ
 	switch {
 	case boundary.EntersDone():
 		closed, closeErr := ops.Close(ctx, issueops.CloseRequest{
-			Actor:   request.Actor,
-			IssueID: request.IssueID,
-			Session: session,
+			Actor:           request.Actor,
+			IssueID:         request.IssueID,
+			Session:         session,
+			ExpectedVersion: version,
 		})
 		if closeErr != nil {
-			return nil, closeErr
+			return nil, lifecycleRaceRefusal(request.IssueID, version, closeErr)
 		}
 		issue = closed.Issue
 	case boundary.LeavesDone():
 		reopened, reopenErr := ops.Reopen(ctx, issueops.ReopenRequest{
-			Actor:   request.Actor,
-			IssueID: request.IssueID,
+			Actor:           request.Actor,
+			IssueID:         request.IssueID,
+			ExpectedVersion: version,
 		})
 		if reopenErr != nil {
-			return nil, reopenErr
+			return nil, lifecycleRaceRefusal(request.IssueID, version, reopenErr)
 		}
 		issue = reopened.Issue
 	default:
@@ -793,17 +814,56 @@ func applyUpdateWithLifecycle(ctx context.Context, ops issueops.Operations, requ
 	}
 
 	if target != issueops.StatusClosed && target != issueops.StatusOpen {
+		if version != nil {
+			fenced, fenceErr := fenceVersion(request.IssueID, issue)
+			if fenceErr != nil {
+				return nil, fenceErr
+			}
+			version = fenced
+		}
 		final, finalErr := ops.Update(ctx, issueops.UpdateRequest{
-			Actor:   request.Actor,
-			IssueID: request.IssueID,
-			Patch:   issueops.IssuePatch{Status: setField(target)},
+			Actor:           request.Actor,
+			IssueID:         request.IssueID,
+			Patch:           issueops.IssuePatch{Status: setField(target)},
+			ExpectedVersion: version,
 		})
 		if finalErr != nil {
-			return nil, finalErr
+			return nil, lifecycleRaceRefusal(request.IssueID, version, finalErr)
 		}
 		issue = final.Issue
 	}
 	return issue, nil
+}
+
+// fenceVersion returns the row version a completed redirect step left behind,
+// for the next step to pin. An operation that reports success without a
+// post-state snapshot breaks the facade's contract and cannot be fenced;
+// carrying on unfenced would silently reopen the guard-to-transition window,
+// so it fails instead.
+func fenceVersion(issueID string, issue *types.Issue) (*int64, error) {
+	if issue == nil {
+		return nil, fmt.Errorf("lifecycle transition for %s: the guarded update reported success without a post-state snapshot, so the transition cannot be fenced", issueID)
+	}
+	version := issue.RowVersion
+	return &version, nil
+}
+
+// lifecycleRaceRefusal labels the compare-and-set refusal the version fence
+// produces. The fence is only ever armed with a version a guard-bearing
+// transaction observed, so a mismatch here means exactly one thing: another
+// writer moved the row after the guard held.
+//
+// It stays ErrVersionMismatch — exit 1 — rather than being folded into the
+// --if-assignee/--if-status mismatch that exits ExitGuardMismatch. Exit 13
+// promises the guard's precondition failed and nothing was written, but by the
+// time the lifecycle step runs, the replayed update has already committed the
+// request's non-status edits. Exit 1's "re-read and retry" is the truthful
+// verdict for a caller left holding a partially applied compound update.
+func lifecycleRaceRefusal(issueID string, version *int64, err error) error {
+	if version == nil || !errors.Is(err, storage.ErrVersionMismatch) {
+		return err
+	}
+	return fmt.Errorf("%s was modified after its update guard was evaluated, so the status change was refused: %w", issueID, err)
 }
 
 func replacesExistingNotes(existing string, fields map[string]any) bool {
