@@ -182,6 +182,14 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	// lifecycle side effects below only fire on a real transition.
 	_, statusChanging := updates["status"]
 
+	// closed_at coherence parity with issueops.updateIssueInTx: an explicit
+	// closed_at must agree with the status this update lands, checked against
+	// the row this unit of work already read and ahead of the close-policy gate
+	// so a refusal writes nothing at all.
+	if err := issueops.ValidateClosedAtCoherence(oldIssue, updates); err != nil {
+		return fmt.Errorf("db: Update %s: %w", id, err)
+	}
+
 	// Close-policy parity with issueops.updateIssueInTx: a status that crosses
 	// into the done category is a close by another name and answers to close
 	// policy. A refusal returns before any write and aborts the caller's unit of
