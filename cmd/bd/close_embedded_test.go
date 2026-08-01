@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -386,6 +387,50 @@ func TestEmbeddedClose(t *testing.T) {
 		got := bdShow(t, bd, dir, issue.ID)
 		if got.Status != types.StatusClosed {
 			t.Errorf("expected closed with --force, got %s", got.Status)
+		}
+	})
+
+	// ga-ktn9pe.4.8: a forced close of a boolean-pinned bead leaves the pin set —
+	// the close write never touches the column, deliberately, because Pinned is
+	// the deletion-protection flag bd gc, bd purge and bd cleanup honor. The plain
+	// retry must therefore still exit 0 as an idempotent already-closed no-op:
+	// that branch is the only thing that re-drives a stranded molecule auto-close.
+	t.Run("close_boolean_pinned_reclose_is_idempotent", func(t *testing.T) {
+		plan := `{"nodes": [{"key": "p", "title": "Boolean pinned", "type": "task", "pinned": true}]}`
+		planFile := filepath.Join(dir, "boolean-pinned-plan.json")
+		if err := os.WriteFile(planFile, []byte(plan), 0644); err != nil {
+			t.Fatal(err)
+		}
+		id := bdCreateGraph(t, bd, dir, planFile).IDs["p"]
+		if id == "" {
+			t.Fatal("graph create returned no ID for key p")
+		}
+		if seeded := bdShow(t, bd, dir, id); !seeded.Pinned {
+			t.Fatalf("precondition: expected pinned=true on the seeded bead, got %+v", seeded)
+		}
+
+		bdClose(t, bd, dir, id, "--force")
+		// The retry carries no --force. Pre-fix it exited nonzero with the pinned
+		// refusal, so bdClose's t.Fatalf is the red assertion.
+		bdClose(t, bd, dir, id)
+
+		got := bdShow(t, bd, dir, id)
+		if got.Status != types.StatusClosed {
+			t.Errorf("status: got %q, want closed", got.Status)
+		}
+		if !got.Pinned {
+			t.Error("expected the pin to survive the close: it is what protects the row from bd gc/purge/cleanup")
+		}
+
+		// The protection the ruling turns on: a pinned closed row is still skipped
+		// by the filter all six destructive call sites run.
+		cutoff := time.Now().UTC().Add(24 * time.Hour)
+		candidates, stats := filterClosedDeletionCandidates([]*types.Issue{got}, &cutoff)
+		if len(candidates) != 0 {
+			t.Errorf("expected the pinned closed row to be excluded from deletion candidates, got %d", len(candidates))
+		}
+		if stats.PinnedSkipped != 1 {
+			t.Errorf("PinnedSkipped: got %d, want 1", stats.PinnedSkipped)
 		}
 	})
 
