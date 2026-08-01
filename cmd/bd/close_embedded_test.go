@@ -471,6 +471,37 @@ func TestEmbeddedClose(t *testing.T) {
 		}
 	})
 
+	// ga-ktn9pe.4.8 collateral, owner-accepted 2026-08-01. Skipping close
+	// validation on an already-closed row skips the whole chain, not just the
+	// pinned guard, so a foreign actor's re-close now exits 0 where it used to
+	// refuse. Nothing is written either way — the engine's `status != closed`
+	// guard makes a re-close a pure no-op — so the be-035 authority check has no
+	// state change left to protect. The guard itself is untouched:
+	// close_assignee_mismatch_refuses_without_force above still pins the refusal
+	// on an OPEN bead, which is the case be-035 was filed for.
+	//
+	// The chain's third validator, NotTemplate, has no equivalent case here
+	// because a closed template is unreachable from the CLI: both
+	// validateIssueClosable and validateIssueUpdatable refuse templates, so
+	// neither `bd close` nor `bd update --status closed` can produce one.
+	t.Run("reclose_by_foreign_actor_is_idempotent", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Foreign reclose", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--actor", "bob", "--claim")
+		bdClose(t, bd, dir, issue.ID, "--actor", "bob")
+
+		// Alice re-closes a bead she never held. bdClose t.Fatalf's on a nonzero
+		// exit, so this line is the assertion.
+		bdClose(t, bd, dir, issue.ID, "--actor", "alice")
+
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("status: got %q, want closed", got.Status)
+		}
+		if got.Assignee != "bob" {
+			t.Errorf("assignee: got %q, want bob — a re-close must not rewrite the holder", got.Assignee)
+		}
+	})
+
 	t.Run("close_same_actor_succeeds", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Same actor", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--actor", "alice", "--claim")
