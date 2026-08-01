@@ -170,6 +170,17 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		updates = resolved
 	}
 
+	// closed_at coherence parity with issueops.updateIssueInTx: an explicit
+	// closed_at must agree with the status this update lands, checked against
+	// the row this unit of work already read and ahead of the close-policy gate
+	// so a refusal writes nothing at all. It runs on the merge-resolved map
+	// BEFORE the no-op filter for the same reason it does there — the guard
+	// reads the caller's intent, and a closed_at equal to the stored value is
+	// still a request to keep the column, not an absent key.
+	if err := issueops.ValidateClosedAtCoherence(oldIssue, updates); err != nil {
+		return fmt.Errorf("db: Update %s: %w", id, err)
+	}
+
 	filteredUpdates, err := issueops.DiscardNoopIssueUpdates(oldIssue, updates)
 	if err != nil {
 		return fmt.Errorf("db: Update %s: compare updates: %w", id, err)
@@ -181,14 +192,6 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	// A status that matched the row was already dropped as a no-op, so the
 	// lifecycle side effects below only fire on a real transition.
 	_, statusChanging := updates["status"]
-
-	// closed_at coherence parity with issueops.updateIssueInTx: an explicit
-	// closed_at must agree with the status this update lands, checked against
-	// the row this unit of work already read and ahead of the close-policy gate
-	// so a refusal writes nothing at all.
-	if err := issueops.ValidateClosedAtCoherence(oldIssue, updates); err != nil {
-		return fmt.Errorf("db: Update %s: %w", id, err)
-	}
 
 	// Close-policy parity with issueops.updateIssueInTx: a status that crosses
 	// into the done category is a close by another name and answers to close

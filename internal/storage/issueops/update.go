@@ -106,6 +106,12 @@ func ManageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setCl
 // This is a coherence invariant rather than close policy, so the force override
 // that waives the open-children and blocker refusals does not waive it, exactly
 // as force never waives the version CAS.
+//
+// Both funnels must call this BEFORE DiscardNoopIssueUpdates. The guard judges
+// the caller's intent, and a closed_at equal to the stored value is still a
+// request to keep the column; the no-op filter drops it as an unchanged value,
+// which would hide exactly the incoherent halves this refuses and let
+// ManageClosedAt's reopen branch clear the column instead.
 func ValidateClosedAtCoherence(oldIssue *types.Issue, updates map[string]interface{}) error {
 	rawClosedAt, hasClosedAt := updates["closed_at"]
 	if !hasClosedAt {
@@ -358,20 +364,29 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	if err != nil {
 		return nil, err
 	}
+
+	// An explicit closed_at must agree with the status the update lands. The
+	// guard reads the caller's INTENT, so it runs on the merge-resolved map
+	// BEFORE the no-op filter: a closed_at that happens to equal the stored
+	// value is still a request to keep the column, and letting the filter drop
+	// it first would send that request down ManageClosedAt's reopen branch —
+	// clearing the column instead of refusing the write, and answering two
+	// identical intents differently over a nanosecond of stamp. Merge-op
+	// resolution only ever writes metadata and notes, so the key the guard sees
+	// is always one the caller supplied. It also runs ahead of the close-policy
+	// gate so a refused write never even touches the dependency coordination
+	// cell, and it reads the row the same transaction just read, so no
+	// concurrent status change can slip between.
+	if err := ValidateClosedAtCoherence(oldIssue, updates); err != nil {
+		return nil, err
+	}
+
 	updates, err = DiscardNoopIssueUpdates(oldIssue, updates)
 	if err != nil {
 		return nil, err
 	}
 	if len(updates) == 0 {
 		return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: false}, nil
-	}
-
-	// An explicit closed_at must agree with the status the update lands. This
-	// runs ahead of the close-policy gate so a refused write never even touches
-	// the dependency coordination cell, and it reads the row the same
-	// transaction just read, so no concurrent status change can slip between.
-	if err := ValidateClosedAtCoherence(oldIssue, updates); err != nil {
-		return nil, err
 	}
 
 	// A status update that crosses into the done category is a close by another

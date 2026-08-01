@@ -371,6 +371,27 @@ func RunIssueOperationsUpdateClosedFieldsMatchClose(t *testing.T, ctx context.Co
 	}
 	assertClosedFields(t, ctx, fixture, explicitID, "explicit close fields", "handled", "session-two", true)
 
+	// The close-crossing defaults have to be observable on a row that carries
+	// stale attribution at the moment it closes. A freshly created row already
+	// has both columns empty, and the re-close above routes through a generic
+	// reopen that blanks them first, so neither case can tell a funnel that
+	// writes the columns from one that merely inherits them. Seeding the stale
+	// values onto an OPEN row does: the columns are allowlisted by name, and
+	// with no closed_at in the map the coherence guard has nothing to refuse.
+	staleID := fixture.IssuePrefix + "-closedfields-stale"
+	seedClosePolicyIssue(t, ctx, fixture, staleID, publicops.CreateRequest{})
+	if err := fixture.UpdateRaw(ctx, staleID, map[string]any{
+		"close_reason": "stale", "closed_by_session": "stale-sess",
+	}, "writer"); err != nil {
+		t.Fatalf("seed stale close attribution on open %s: %v", staleID, err)
+	}
+	assertClosedFields(t, ctx, fixture, staleID, "stale attribution staged while open", "stale", "stale-sess", false)
+
+	if err := fixture.UpdateRaw(ctx, staleID, map[string]any{"status": string(types.StatusClosed)}, "writer"); err != nil {
+		t.Fatalf("generic close of %s over stale attribution: %v", staleID, err)
+	}
+	assertClosedFields(t, ctx, fixture, staleID, "generic close over stale attribution", "", "", true)
+
 	// The coherence guard. Stamping closed_at on a row that stays open is
 	// refused by name, typed as a validation error, and writes nothing.
 	guardID := fixture.IssuePrefix + "-closedfields-guard"
@@ -411,6 +432,20 @@ func RunIssueOperationsUpdateClosedFieldsMatchClose(t *testing.T, ctx context.Co
 	assertClosedAtRefusal(t, err, "clearing closed_at on a closed row", guardID)
 	assertClosePolicyStatus(t, ctx, fixture, guardID, types.StatusClosed)
 	assertClosedFields(t, ctx, fixture, guardID, "after refused closed_at clear", "", "", true)
+
+	// The same refusal must hold when the explicit closed_at happens to equal
+	// the value already stored. That is a no-op by VALUE and an incoherent
+	// write by INTENT — the caller is asking to reopen the row and keep its
+	// closed_at — so the guard has to see the key before the no-op filter can
+	// drop it. Otherwise this write and the identical one carrying a stamp one
+	// nanosecond off get opposite answers, and the reopen silently clears the
+	// column the caller explicitly asked to keep.
+	err = fixture.UpdateRaw(ctx, guardID, map[string]any{
+		"status": string(types.StatusOpen), "closed_at": repaired,
+	}, "writer")
+	assertClosedAtRefusal(t, err, "reopening while restating the row's own closed_at", guardID)
+	assertClosePolicyStatus(t, ctx, fixture, guardID, types.StatusClosed)
+	assertClosedFields(t, ctx, fixture, guardID, "after refused no-op-valued closed_at reopen", "", "", true)
 
 	// Clearing it as part of a reopen is coherent, so it is allowed.
 	if err := fixture.UpdateRaw(ctx, guardID, map[string]any{
