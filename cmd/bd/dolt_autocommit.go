@@ -6,8 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
@@ -46,6 +44,43 @@ func transactHonoringAutoCommit(ctx context.Context, s storage.DoltStorage, comm
 		commandDidExplicitDoltCommit = true
 	}
 	return err
+}
+
+// embeddedWritesCommitNow reports whether an embedded-mode CLI write should
+// create its Dolt version commit now. Batch and off defer it to an explicit
+// commit point (bd dolt commit); an unset value is the embedded default, which
+// PersistentPreRun resolves to "on". Server mode is never the CLI's commit to
+// make — the storage layer versions those writes itself.
+func embeddedWritesCommitNow() (bool, error) {
+	if !isEmbeddedMode() {
+		return false, nil
+	}
+	if strings.TrimSpace(doltAutoCommit) == "" {
+		return true, nil
+	}
+	mode, err := getDoltAutoCommitMode()
+	if err != nil {
+		return false, err
+	}
+	return mode == doltAutoCommitOn, nil
+}
+
+// issueOpsContext applies command auto-commit policy to the context a write verb
+// hands the issue-operations facade. The facade creates its Dolt version commit
+// inside the storage layer, so batch mode cannot blank a commit message the way
+// transactHonoringAutoCommit does — it has to say so on the context instead.
+func issueOpsContext(ctx context.Context) (context.Context, error) {
+	if !isEmbeddedMode() {
+		return ctx, nil
+	}
+	commitNow, err := embeddedWritesCommitNow()
+	if err != nil {
+		return nil, err
+	}
+	if commitNow {
+		return ctx, nil
+	}
+	return issueops.WithDeferredVersionCommit(ctx), nil
 }
 
 type doltAutoCommitParams struct {
@@ -113,79 +148,6 @@ func maybeAutoCommitStore(ctx context.Context, st storage.DoltStorage, p doltAut
 		return err
 	}
 	return nil
-}
-
-// autoCommitSweepExemptPaths are inspection commands that display version
-// control or working-set state. The unflagged-writes sweep must never run
-// after them: bd dolt status would commit the dirty state it just displayed,
-// destroying the inspect-before-commit flow (bd-578h9.7). Keyed by full
-// command path because leaf names like "status" collide across parents.
-var autoCommitSweepExemptPaths = map[string]bool{
-	"bd dolt status": true,
-	"bd vc status":   true,
-	"bd diff":        true,
-	"bd history":     true,
-}
-
-// autoCommitSweepExempt reports whether cmd must not trigger the
-// dirty-working-set sweep (bd-578h9.7). Read-only commands are exempt for a
-// second reason: they open the embedded store read-only, so the sweep's
-// commit would fail with errReadOnly and turn a successful read into a fatal
-// error. Explicitly flagged writes (commandDidWrite) still auto-commit.
-func autoCommitSweepExempt(cmd *cobra.Command) bool {
-	return isReadOnlyCommand(cmd.Name()) || autoCommitSweepExemptPaths[cmd.CommandPath()]
-}
-
-// formatDoltSweepCommitMessage attributes a sweep commit distinctly from a
-// normal auto-commit: the swept changes belong to an EARLIER command that
-// failed (or forgot commandDidWrite) before its own auto-commit could run —
-// blaming them on the command that merely triggered the sweep corrupts the
-// audit trail (bd-578h9.7).
-func formatDoltSweepCommitMessage(cmd, actor string) string {
-	cmd = strings.TrimSpace(cmd)
-	if cmd == "" {
-		cmd = "write"
-	}
-	actor = strings.TrimSpace(actor)
-	if actor == "" {
-		actor = "unknown"
-	}
-	return fmt.Sprintf("bd: autocommit sweep of earlier uncommitted changes (after %s by %s)", cmd, actor)
-}
-
-// workingSetHasUnflaggedWrites reports whether the embedded working set holds
-// committable changes even though no write path set commandDidWrite. It is the
-// safety net behind that flag: a mutating command that forgets to set it would
-// otherwise leave its writes to be swept into the NEXT command's auto-commit
-// with wrong attribution (bd-6dnrw.11). Only meaningful in embedded mode with
-// auto-commit "on" — batch mode keeps the working set dirty by design.
-func workingSetHasUnflaggedWrites(ctx context.Context, cmdName string) bool {
-	if !isEmbeddedMode() {
-		return false
-	}
-	if mode, err := getDoltAutoCommitMode(); err != nil || mode != doltAutoCommitOn {
-		return false
-	}
-	st := getStore()
-	if st == nil {
-		return false
-	}
-	unwrapped := storage.UnwrapStore(st)
-	if lm, ok := unwrapped.(storage.LifecycleManager); ok && lm.IsClosed() {
-		return false
-	}
-	checker, ok := unwrapped.(interface {
-		HasPendingChanges(ctx context.Context) (bool, error)
-	})
-	if !ok {
-		return false
-	}
-	dirty, err := checker.HasPendingChanges(ctx)
-	if err != nil || !dirty {
-		return false
-	}
-	debug.Logf("command %q left uncommitted changes without setting commandDidWrite; auto-committing anyway (bd-6dnrw.11)", cmdName)
-	return true
 }
 
 func isDoltNothingToCommit(err error) bool {

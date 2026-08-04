@@ -201,6 +201,17 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 		StartTime: time.Now(),
 	}
 
+	// GH#2474 / bd-578h9.2: commit pending changes before the merge, matching
+	// embedded Pull/PullRemote/PullFrom and server-mode Sync. Embedded Commit is
+	// DOLT_COMMIT('-Am'), so it stages config — where kv.memory.* memories live —
+	// and a leftover dirty working set (e.g. a `bd remember` write) would
+	// otherwise make DOLT_MERGE refuse to start ("cannot merge with uncommitted
+	// changes"). CommitPending is a no-op when the working set is already clean.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		result.Error = fmt.Errorf("commit pending before sync: %w", err)
+		return result, result.Error
+	}
+
 	// Step 1: Fetch
 	if err := s.Fetch(ctx, peer); err != nil {
 		result.Error = fmt.Errorf("fetch failed: %w", err)
@@ -236,7 +247,13 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 		}
 		result.ConflictsResolved = true
 
-		if err := s.Commit(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
+		// CommitMergeResolution, not Commit: Commit's GH#3886 nothing-to-commit
+		// tolerance would swallow the --ours case (resolution dirties nothing)
+		// as a silent no-op here, leaving dolt_merge_status.is_merging true while
+		// this function reports result.Merged = true and pushes — the exact
+		// re-wedge CommitMergeResolution's doc comment describes. See the
+		// server-mode twin, dolt/federation.go's Sync.
+		if err := s.CommitMergeResolution(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
 			result.Error = fmt.Errorf("commit conflict resolution: %w", err)
 			return result, result.Error
 		}

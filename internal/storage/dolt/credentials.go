@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -297,12 +298,16 @@ func (s *DoltStore) AddFederationPeer(ctx context.Context, peer *storage.Federat
 		return fmt.Errorf("failed to add federation peer: %w", err)
 	}
 
-	// Also add the Dolt remote
+	// Also add the Dolt remote.
 	if err := s.AddRemote(ctx, peer.Name, peer.RemoteURL); err != nil {
 		// Ignore "remote already exists" errors
 		if !strings.Contains(err.Error(), "already exists") {
 			return fmt.Errorf("failed to add dolt remote: %w", err)
 		}
+	}
+
+	if err := s.doltAddAndCommit(ctx, []string{"federation_peers"}, "federation: add peer "+peer.Name); err != nil {
+		return fmt.Errorf("failed to commit federation peer: %w", err)
 	}
 
 	return nil
@@ -494,7 +499,15 @@ func applyS3ChecksumEnvToCmd(cmd *exec.Cmd) {
 // skip them. Same intent as the `--no-verify` fix on the commit side
 // (GH#3340 / GH#3598 / PR #3626), applied at the push site (GH#3724).
 func applyNoGitHooksToCmd(cmd *exec.Cmd) {
-	setCmdEnv(cmd, "GIT_CONFIG_PARAMETERS", "'core.hooksPath=/dev/null'")
+	base := cmd.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	// Append rather than replace: a caller that set its own
+	// GIT_CONFIG_PARAMETERS (a test harness pinning user.email, say) would
+	// otherwise have it silently dropped by this call.
+	setCmdEnv(cmd, githooksenv.ParametersEnv,
+		githooksenv.AppendParameter(githooksenv.Extract(base), githooksenv.NoHooksParam))
 }
 
 // setFederationCredentials sets DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD env vars.

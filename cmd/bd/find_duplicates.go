@@ -16,6 +16,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -36,13 +37,13 @@ with different wording.
 
 Approaches:
   mechanical  Token-based text similarity (default, no API key needed)
-  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY or ai.api_key)
+  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key)
 
 The mechanical approach tokenizes titles and descriptions, then computes
 Jaccard similarity between all issue pairs. It's fast and free but may
 miss semantically similar issues with very different wording.
 
-The AI approach sends candidate pairs to Claude for semantic comparison.
+The AI approach sends candidate pairs to an Anthropic-compatible model for semantic comparison.
 It first uses mechanical pre-filtering to reduce the number of API calls,
 then asks the LLM to judge whether the remaining pairs are true duplicates.
 
@@ -53,7 +54,9 @@ Examples:
   bd find-duplicates --status open         # Only check open issues
   bd find-duplicates --limit 20            # Show top 20 pairs
   bd find-duplicates --json                # JSON output`,
-	Run: runFindDuplicates,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runFindDuplicates,
 }
 
 func init() {
@@ -62,6 +65,8 @@ func init() {
 	findDuplicatesCmd.Flags().StringP("status", "s", "", "Filter by status (default: non-closed)")
 	findDuplicatesCmd.Flags().IntP("limit", "n", 50, "Maximum number of pairs to show")
 	findDuplicatesCmd.Flags().String("model", "", "AI model to use (only with --method ai; default from config ai.model)")
+	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
+	addMaxRowsFlag(findDuplicatesCmd)
 	rootCmd.AddCommand(findDuplicatesCmd)
 }
 
@@ -74,66 +79,94 @@ type duplicatePair struct {
 	Reason     string       `json:"reason,omitempty"`
 }
 
-func runFindDuplicates(cmd *cobra.Command, _ []string) {
+func runFindDuplicates(cmd *cobra.Command, _ []string) error {
+	evt := metrics.NewCommandEvent("find-duplicates")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	method, _ := cmd.Flags().GetString("method")
 	threshold, _ := cmd.Flags().GetFloat64("threshold")
 	status, _ := cmd.Flags().GetString("status")
 	limit, _ := cmd.Flags().GetInt("limit")
 	model, _ := cmd.Flags().GetString("model")
 	if model == "" {
-		model = config.DefaultAIModel()
+		_, keySource := config.ResolveAIAPIKey("")
+		model = config.DefaultAIModelFor(keySource)
 	}
 
-	ctx := rootCtx
-
-	// Validate method
 	if method != "mechanical" && method != "ai" {
-		FatalError("invalid method %q (use: mechanical, ai)", method)
+		return HandleErrorRespectJSON("invalid method %q (use: mechanical, ai)", method)
 	}
 
-	// AI method requires API key
 	if method == "ai" {
-		if os.Getenv("ANTHROPIC_API_KEY") == "" && config.GetString("ai.api_key") == "" {
-			FatalError("--method ai requires ANTHROPIC_API_KEY environment variable or ai.api_key in config")
+		if apiKey, _ := config.ResolveAIAPIKey(""); apiKey == "" {
+			return HandleErrorRespectJSON("--method ai requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config")
 		}
 	}
 
 	// Fetch issues
-	filter := types.IssueFilter{}
+	maxRows, maxRowsSource, err := resolveMaxRows(cmd)
+	if err != nil {
+		return err
+	}
+	filter := types.IssueFilter{
+		MaxRows:       maxRows,
+		MaxRowsSource: maxRowsSource,
+	}
 	if status != "" && status != "all" {
 		s := types.Status(status)
 		filter.Status = &s
 	}
 
-	var issues []*types.Issue
-	var err error
-
-	issues, err = store.SearchIssues(ctx, "", filter)
-	if err != nil {
-		FatalError("fetching issues: %v", err)
-	}
-
-	// Default: filter out closed issues unless status flag is set
-	if status == "" {
-		var filtered []*types.Issue
-		for _, issue := range issues {
-			if issue.Status != types.StatusClosed {
-				filtered = append(filtered, issue)
-			}
+	if usesProxiedServer() {
+		// maxRows was already resolved above (to build filter); reject using
+		// that value directly instead of re-resolving via
+		// rejectMaxRowsUnderProxiedServer, which would call resolveMaxRows a
+		// second time and double any malformed-env warning it emits.
+		if err := rejectResolvedMaxRowsUnderProxiedServer(maxRows); err != nil {
+			return err
 		}
-		issues = filtered
+		return runFindDuplicatesProxiedServer(rootCtx, filter, status, method, threshold, limit, model)
 	}
 
+	issues, err := store.SearchIssues(rootCtx, "", filter)
+	if err != nil {
+		if capErr := handleMaxRowsError(err); capErr != nil {
+			return capErr
+		}
+		return HandleErrorRespectJSON("fetching issues: %v", err)
+	}
+	issues = filterClosedIfNoStatus(issues, status)
+
+	return reportFindDuplicates(rootCtx, issues, method, threshold, limit, model)
+}
+
+func filterClosedIfNoStatus(issues []*types.Issue, status string) []*types.Issue {
+	if status != "" {
+		return issues
+	}
+	var filtered []*types.Issue
+	for _, issue := range issues {
+		if issue.Status != types.StatusClosed {
+			filtered = append(filtered, issue)
+		}
+	}
+	return filtered
+}
+
+func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method string, threshold float64, limit int, model string) error {
 	if len(issues) < 2 {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"pairs": []interface{}{},
 				"count": 0,
 			})
-		} else {
-			fmt.Println("Not enough issues to compare (need at least 2)")
 		}
-		return
+		fmt.Println("Not enough issues to compare (need at least 2)")
+		return nil
 	}
 
 	// Find duplicate pairs
@@ -178,18 +211,17 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) {
 				Reason:      p.Reason,
 			}
 		}
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"pairs":     jsonPairs,
 			"count":     len(jsonPairs),
 			"method":    method,
 			"threshold": threshold,
 		})
-		return
 	}
 
 	if len(pairs) == 0 {
 		fmt.Printf("No similar issues found (threshold: %.0f%%)\n", threshold*100)
-		return
+		return nil
 	}
 
 	fmt.Printf("%s Found %d potential duplicate pair(s) (threshold: %.0f%%):\n\n",
@@ -205,6 +237,7 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) {
 		}
 		fmt.Printf("  %s bd show %s %s\n\n", ui.RenderAccent("Compare:"), p.IssueA.ID, p.IssueB.ID)
 	}
+	return nil
 }
 
 // tokenize splits text into lowercase word tokens, removing punctuation.
@@ -362,11 +395,12 @@ func findAIDuplicates(ctx context.Context, issues []*types.Issue, threshold floa
 
 	fmt.Fprintf(os.Stderr, "Analyzing %d candidate pairs with AI...\n", len(candidates))
 
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if apiKey == "" {
-		apiKey = config.GetString("ai.api_key")
+	apiKey, keySource := config.ResolveAIAPIKey("")
+	clientOptions := []option.RequestOption{option.WithAPIKey(apiKey)}
+	if baseURL := config.DefaultAIBaseURL(keySource); baseURL != "" {
+		clientOptions = append(clientOptions, option.WithBaseURL(baseURL))
 	}
-	client := anthropic.NewClient(option.WithAPIKey(apiKey))
+	client := anthropic.NewClient(clientOptions...)
 
 	var pairs []duplicatePair
 
