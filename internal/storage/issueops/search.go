@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
+	"golang.org/x/sync/errgroup"
 )
 
 // SearchIssuesInTx executes a filtered issue search within an existing
@@ -93,6 +94,10 @@ func hydrateIssueLabelsAndDeps(ctx context.Context, tx DBTX, tables FilterTables
 	for i, issue := range issues {
 		ids[i] = issue.ID
 	}
+	if db, ok := tx.(*sql.DB); ok && filter.Lite && !filter.SkipLabels && filter.IncludeDependencies {
+		return hydrateIssueRelationsFromDB(ctx, db, tables, issues, ids, wholeTable)
+	}
+
 	if !filter.SkipLabels {
 		var labelMap map[string][]string
 		var err error
@@ -126,6 +131,54 @@ func hydrateIssueLabelsAndDeps(ctx context.Context, tx DBTX, tables FilterTables
 			if deps, ok := depMap[issue.ID]; ok {
 				issue.Dependencies = deps
 			}
+		}
+	}
+	return nil
+}
+
+func hydrateIssueRelationsFromDB(ctx context.Context, db *sql.DB, tables FilterTables, issues []*types.Issue, ids []string, wholeTable bool) error {
+	var labelMap map[string][]string
+	var depMap map[string][]*types.Dependency
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		var labels map[string][]string
+		var err error
+		if wholeTable {
+			labels, err = getAllLabelsFromTableInTx(groupCtx, db, tables.Labels)
+		} else {
+			labels, err = GetLabelsForIssuesFromTableInTx(groupCtx, db, tables.Labels, ids)
+		}
+		if err != nil {
+			return fmt.Errorf("hydrate labels: %w", err)
+		}
+		labelMap = labels
+		return nil
+	})
+	group.Go(func() error {
+		deps := make(map[string][]*types.Dependency)
+		var err error
+		if wholeTable {
+			err = getAllDependencyRecordsIntoFromTable(groupCtx, db, tables.Dependencies, deps)
+		} else {
+			deps, err = GetDependencyRecordsForIssuesFromTableInTx(groupCtx, db, tables.Dependencies, ids)
+		}
+		if err != nil {
+			return fmt.Errorf("hydrate dependencies: %w", err)
+		}
+		depMap = deps
+		return nil
+	})
+	if err := group.Wait(); err != nil {
+		return err
+	}
+
+	for _, issue := range issues {
+		if labels, ok := labelMap[issue.ID]; ok {
+			issue.Labels = labels
+		}
+		if deps, ok := depMap[issue.ID]; ok {
+			issue.Dependencies = deps
 		}
 	}
 	return nil
