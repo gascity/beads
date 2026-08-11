@@ -170,6 +170,14 @@ func TestOpenServerPostgres(t *testing.T) {
 	})
 }
 
+func TestOpenExistingServerPostgresValidation(t *testing.T) {
+	for _, cfg := range []PostgresServerConfig{{Schema: "workspace"}, {DSN: "postgres://x"}} {
+		if _, err := OpenExistingServerPostgres(context.Background(), cfg); err == nil {
+			t.Fatalf("OpenExistingServerPostgres(%+v) succeeded", cfg)
+		}
+	}
+}
+
 // TestOpenServerPostgresEventsJournalIsProjectScoped proves Hosted enables the
 // durable journal on the explicitly selected project only. Opening another
 // project in the same process must not inherit that activation.
