@@ -23,13 +23,24 @@ func loadBlockingDepsForIssueIDsInTx(ctx context.Context, tx DBTX, depTables []s
 	var deps []blockingDepRecord
 	for _, depTable := range depTables {
 		//nolint:gosec // G201: depTable is a hardcoded constant.
-		query := fmt.Sprintf(`
-			SELECT issue_id, %s AS depends_on_id, type, metadata FROM %s
-			WHERE issue_id = ?
-			  AND (type = 'blocks' OR type = 'waits-for' OR type = 'conditional-blocks')
-		`, DepTargetExpr, depTable)
-		for _, id := range issueIDs {
-			rows, err := tx.QueryContext(ctx, query, id)
+		for start := 0; start < len(issueIDs); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(issueIDs) {
+				end = len(issueIDs)
+			}
+			batch := issueIDs[start:end]
+			placeholders := make([]string, len(batch))
+			args := make([]any, len(batch))
+			for i, id := range batch {
+				placeholders[i] = "?"
+				args[i] = id
+			}
+			query := fmt.Sprintf(`
+				SELECT issue_id, %s AS depends_on_id, type, metadata FROM %s
+				WHERE issue_id IN (%s)
+				  AND (type = 'blocks' OR type = 'waits-for' OR type = 'conditional-blocks')
+			`, DepTargetExpr, depTable, strings.Join(placeholders, ","))
+			rows, err := tx.QueryContext(ctx, query, args...)
 			if err != nil {
 				if optionalBlockedTable(depTable) && isTableNotExistError(err) {
 					break
@@ -57,13 +68,24 @@ func loadParentIDsForChildrenInTx(ctx context.Context, tx DBTX, depTables []stri
 	childParents := make(map[string]string)
 	for _, depTable := range depTables {
 		//nolint:gosec // G201: depTable is a hardcoded constant.
-		query := fmt.Sprintf(`
-			SELECT issue_id, %s AS depends_on_id FROM %s
-			WHERE issue_id = ?
-			  AND type = 'parent-child'
-		`, DepTargetExpr, depTable)
-		for _, id := range childIDs {
-			rows, err := tx.QueryContext(ctx, query, id)
+		for start := 0; start < len(childIDs); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(childIDs) {
+				end = len(childIDs)
+			}
+			batch := childIDs[start:end]
+			placeholders := make([]string, len(batch))
+			args := make([]any, len(batch))
+			for i, id := range batch {
+				placeholders[i] = "?"
+				args[i] = id
+			}
+			query := fmt.Sprintf(`
+				SELECT issue_id, %s AS depends_on_id FROM %s
+				WHERE issue_id IN (%s)
+				  AND type = 'parent-child'
+			`, DepTargetExpr, depTable, strings.Join(placeholders, ","))
+			rows, err := tx.QueryContext(ctx, query, args...)
 			if err != nil {
 				if optionalBlockedTable(depTable) && isTableNotExistError(err) {
 					break

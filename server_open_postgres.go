@@ -32,6 +32,11 @@ type PostgresServerConfig struct {
 	EventsJournal bool
 }
 
+// ErrPostgresExistingSchemaNeedsRepair identifies a current-version Postgres
+// schema that is missing a known legacy capability. Callers may use errors.Is
+// to route only this error through OpenServerPostgres for repair.
+var ErrPostgresExistingSchemaNeedsRepair = postgres.ErrExistingSchemaNeedsRepair
+
 // OpenServerPostgres opens the beads engine against an external Postgres
 // server, the Postgres sibling of OpenServer. No .beads directory,
 // metadata.json, or credentials file is involved. Provisioning is implicit and
@@ -40,16 +45,42 @@ type PostgresServerConfig struct {
 // verify the stamp and refuse a version mismatch (the embedding server owns
 // schema version).
 func OpenServerPostgres(ctx context.Context, cfg PostgresServerConfig) (Storage, error) {
-	if cfg.DSN == "" {
-		return nil, fmt.Errorf("beads: OpenServerPostgres requires a DSN")
-	}
-	if cfg.Schema == "" {
-		return nil, fmt.Errorf("beads: OpenServerPostgres requires a Schema")
+	if err := validatePostgresServerConfig("OpenServerPostgres", cfg); err != nil {
+		return nil, err
 	}
 	st, err := postgres.Provision(ctx, cfg.DSN, cfg.Schema)
 	if err != nil {
 		return nil, err
 	}
+	return configurePostgresServerStore(st, cfg)
+}
+
+// OpenExistingServerPostgres opens a previously provisioned Postgres schema
+// without creating or altering it. It validates the stored schema version with
+// reads and pings the returned store before returning it. Use OpenServerPostgres
+// for provisioning a fresh schema.
+func OpenExistingServerPostgres(ctx context.Context, cfg PostgresServerConfig) (Storage, error) {
+	if err := validatePostgresServerConfig("OpenExistingServerPostgres", cfg); err != nil {
+		return nil, err
+	}
+	st, err := postgres.OpenExisting(ctx, cfg.DSN, cfg.Schema)
+	if err != nil {
+		return nil, err
+	}
+	return configurePostgresServerStore(st, cfg)
+}
+
+func validatePostgresServerConfig(op string, cfg PostgresServerConfig) error {
+	if cfg.DSN == "" {
+		return fmt.Errorf("beads: %s requires a DSN", op)
+	}
+	if cfg.Schema == "" {
+		return fmt.Errorf("beads: %s requires a Schema", op)
+	}
+	return nil
+}
+
+func configurePostgresServerStore(st storage.DoltStorage, cfg PostgresServerConfig) (Storage, error) {
 	journalConfig, ok := st.(storage.EventsJournalConfigurer)
 	if !ok {
 		_ = st.Close()
