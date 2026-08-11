@@ -15,7 +15,11 @@ import (
 // dependencies via filter.IncludeDependencies). Routing, wisp-merge, and
 // overlap detection live in the shared searchInTx wrapper.
 func SearchIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) ([]*types.Issue, error) {
-	return searchInTx(ctx, tx, query, filter, issueProjection)
+	projection := issueProjection
+	if filter.Lite {
+		projection = issueLiteProjection
+	}
+	return searchInTx(ctx, tx, query, filter, projection)
 }
 
 // SearchIssueIDsInTx is the narrow-projection variant of SearchIssuesInTx:
@@ -52,6 +56,17 @@ type searchProjection[T any] struct {
 var issueProjection = searchProjection[*types.Issue]{
 	columns:  func(_ FilterTables) string { return IssueSelectColumns },
 	scan:     func(rows *sql.Rows) (*types.Issue, error) { return ScanIssueFrom(rows) },
+	id:       func(issue *types.Issue) string { return issue.ID },
+	hydrate:  hydrateIssueLabelsAndDeps,
+	idShrink: true,
+}
+
+// issueLiteProjection is the opt-in counterpart to issueProjection. It shares
+// filtering, ordering, wisp routing, ID shrinking, and relation hydration while
+// selecting and scanning the narrower issue shape.
+var issueLiteProjection = searchProjection[*types.Issue]{
+	columns:  func(_ FilterTables) string { return IssueSelectColumnsLite },
+	scan:     func(rows *sql.Rows) (*types.Issue, error) { return ScanIssueLiteFrom(rows) },
 	id:       func(issue *types.Issue) string { return issue.ID },
 	hydrate:  hydrateIssueLabelsAndDeps,
 	idShrink: true,
