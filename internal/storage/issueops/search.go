@@ -62,14 +62,14 @@ var issueProjection = searchProjection[*types.Issue]{
 }
 
 // issueLiteProjection is the opt-in counterpart to issueProjection. It shares
-// filtering, ordering, wisp routing, ID shrinking, and relation hydration while
+// filtering, ordering, wisp routing, and relation hydration while
 // selecting and scanning the narrower issue shape.
 var issueLiteProjection = searchProjection[*types.Issue]{
 	columns:  func(_ FilterTables) string { return IssueSelectColumnsLite },
 	scan:     func(rows *sql.Rows) (*types.Issue, error) { return ScanIssueLiteFrom(rows) },
 	id:       func(issue *types.Issue) string { return issue.ID },
 	hydrate:  hydrateIssueLabelsAndDeps,
-	idShrink: true,
+	idShrink: false,
 }
 
 var idProjection = searchProjection[string]{

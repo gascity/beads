@@ -60,7 +60,7 @@ func TestSearchIssuesInTxLitePreservesRelationsAndOmitsHeavyFields(t *testing.T)
 		Status:              &status,
 		IncludeDependencies: true,
 		SkipWisps:           true,
-		NoIDShrink:          true,
+		Limit:               2,
 		Lite:                true,
 	})
 	if err != nil {
@@ -81,6 +81,47 @@ func TestSearchIssuesInTxLitePreservesRelationsAndOmitsHeavyFields(t *testing.T)
 	}
 	if len(got[0].Dependencies) != 1 || got[0].Dependencies[0].DependsOnID != "bd-002" {
 		t.Fatalf("first issue dependencies = %v, want bd-002", got[0].Dependencies)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+func TestSearchIssuesInTxFullLimitedUsesPatternB(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(`SELECT issues\.id FROM issues .*ORDER BY.*LIMIT 2`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).
+			AddRow("bd-002").
+			AddRow("bd-001"))
+	second := issueRowValues("bd-001", "one")
+	third := issueRowValues("bd-002", "two")
+	for i, col := range issueColumns() {
+		if col == "description" {
+			second[i] = "first fetched"
+			third[i] = "second fetched"
+		}
+	}
+	mock.ExpectQuery(`(?s)SELECT .*description.* FROM issues WHERE id IN \(\?,\?\)`).
+		WithArgs("bd-002", "bd-001").
+		WillReturnRows(issueRows().
+			AddRow(second...).
+			AddRow(third...))
+
+	got, err := SearchIssuesInTx(context.Background(), tx, "", types.IssueFilter{
+		SkipWisps:  true,
+		SkipLabels: true,
+		Limit:      2,
+	})
+	if err != nil {
+		t.Fatalf("SearchIssuesInTx: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "bd-002" || got[1].ID != "bd-001" {
+		t.Fatalf("issues = %#v, want [bd-002 bd-001] in id-scan order", got)
+	}
+	if got[0].Description != "second fetched" || got[1].Description != "first fetched" {
+		t.Fatalf("descriptions = [%q %q], want [second fetched first fetched]", got[0].Description, got[1].Description)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
