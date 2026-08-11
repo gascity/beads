@@ -15,7 +15,11 @@ import (
 // dependencies via filter.IncludeDependencies). Routing, wisp-merge, and
 // overlap detection live in the shared searchInTx wrapper.
 func SearchIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) ([]*types.Issue, error) {
-	return searchInTx(ctx, tx, query, filter, issueProjection)
+	projection := issueProjection
+	if filter.Lite {
+		projection = issueLiteProjection
+	}
+	return searchInTx(ctx, tx, query, filter, projection)
 }
 
 // SearchIssueIDsInTx is the narrow-projection variant of SearchIssuesInTx:
@@ -42,7 +46,7 @@ type searchProjection[T any] struct {
 	// hydrate is invoked once per table after rows are scanned and the result
 	// set is closed (so we don't hold multiple active result sets on the same
 	// connection). nil for projections that don't need post-scan loading.
-	hydrate func(ctx context.Context, tx DBTX, tables FilterTables, items []T, filter types.IssueFilter) error
+	hydrate func(ctx context.Context, tx DBTX, tables FilterTables, items []T, filter types.IssueFilter, wholeTable bool) error
 	// idShrink enables Pattern B (cheap SELECT id scan → batch hydrate) for
 	// limited queries. Worth it only for wide projections; the id projection
 	// already scans id-only with no hydration, so it leaves this false.
@@ -55,6 +59,17 @@ var issueProjection = searchProjection[*types.Issue]{
 	id:       func(issue *types.Issue) string { return issue.ID },
 	hydrate:  hydrateIssueLabelsAndDeps,
 	idShrink: true,
+}
+
+// issueLiteProjection is the opt-in counterpart to issueProjection. It shares
+// filtering, ordering, wisp routing, and relation hydration while
+// selecting and scanning the narrower issue shape.
+var issueLiteProjection = searchProjection[*types.Issue]{
+	columns:  func(_ FilterTables) string { return IssueSelectColumnsLite },
+	scan:     func(rows *sql.Rows) (*types.Issue, error) { return ScanIssueLiteFrom(rows) },
+	id:       func(issue *types.Issue) string { return issue.ID },
+	hydrate:  hydrateIssueLabelsAndDeps,
+	idShrink: false,
 }
 
 var idProjection = searchProjection[string]{
@@ -73,13 +88,19 @@ var idProjection = searchProjection[string]{
 // issues/wisps tables, so every ID here belongs to tables.Labels — we use
 // GetLabelsForIssuesFromTableInTx and skip the per-batch wisp-partition
 // round-trip the generic GetLabelsForIssuesInTx performs (GH#3414).
-func hydrateIssueLabelsAndDeps(ctx context.Context, tx DBTX, tables FilterTables, issues []*types.Issue, filter types.IssueFilter) error {
+func hydrateIssueLabelsAndDeps(ctx context.Context, tx DBTX, tables FilterTables, issues []*types.Issue, filter types.IssueFilter, wholeTable bool) error {
 	ids := make([]string, len(issues))
 	for i, issue := range issues {
 		ids[i] = issue.ID
 	}
 	if !filter.SkipLabels {
-		labelMap, err := GetLabelsForIssuesFromTableInTx(ctx, tx, tables.Labels, ids)
+		var labelMap map[string][]string
+		var err error
+		if wholeTable {
+			labelMap, err = getAllLabelsFromTableInTx(ctx, tx, tables.Labels)
+		} else {
+			labelMap, err = GetLabelsForIssuesFromTableInTx(ctx, tx, tables.Labels, ids)
+		}
 		if err != nil {
 			return fmt.Errorf("hydrate labels: %w", err)
 		}
@@ -91,7 +112,13 @@ func hydrateIssueLabelsAndDeps(ctx context.Context, tx DBTX, tables FilterTables
 	}
 
 	if filter.IncludeDependencies {
-		depMap, err := GetDependencyRecordsForIssuesFromTableInTx(ctx, tx, tables.Dependencies, ids)
+		depMap := make(map[string][]*types.Dependency)
+		var err error
+		if wholeTable {
+			err = getAllDependencyRecordsIntoFromTable(ctx, tx, tables.Dependencies, depMap)
+		} else {
+			depMap, err = GetDependencyRecordsForIssuesFromTableInTx(ctx, tx, tables.Dependencies, ids)
+		}
 		if err != nil {
 			return fmt.Errorf("hydrate dependencies: %w", err)
 		}
@@ -241,7 +268,7 @@ func searchTableInTxT[T any](ctx context.Context, tx DBTX, query string, filter 
 	}
 
 	if proj.hydrate != nil && len(results) > 0 {
-		if err := proj.hydrate(ctx, tx, tables, results, filter); err != nil {
+		if err := proj.hydrate(ctx, tx, tables, results, filter, len(whereClauses) == 0 && filter.Limit == 0); err != nil {
 			return nil, fmt.Errorf("search %s: %w", tables.Main, err)
 		}
 	}
@@ -304,7 +331,7 @@ func searchTablePatternBT[T any](ctx context.Context, tx DBTX, query string, fil
 	}
 
 	if proj.hydrate != nil && len(results) > 0 {
-		if err := proj.hydrate(ctx, tx, tables, results, filter); err != nil {
+		if err := proj.hydrate(ctx, tx, tables, results, filter, false); err != nil {
 			return nil, fmt.Errorf("search %s (pattern B): %w", tables.Main, err)
 		}
 	}
