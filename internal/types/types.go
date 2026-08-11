@@ -119,6 +119,12 @@ type Issue struct {
 	Actor     string `json:"actor,omitempty"`      // Entity URI who caused this event
 	Target    string `json:"target,omitempty"`     // Entity URI or bead ID affected
 	Payload   string `json:"payload,omitempty"`    // Event-specific JSON data
+
+	// IsLitePartial marks issues returned by a lite SELECT. The heavy body
+	// fields were not hydrated and remain zero-valued; callers needing them
+	// must refetch the issue through GetIssue. This internal flag is never
+	// serialized.
+	IsLitePartial bool `json:"-"`
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.
@@ -1302,6 +1308,12 @@ type IssueFilter struct {
 	Offset   int
 	SortBy   string
 	SortDesc bool
+
+	// Lite selects all issue fields except the heavy body columns description,
+	// design, acceptance_criteria, notes, payload, and waiters. Returned issues
+	// carry IsLitePartial=true. The default false value preserves full issue
+	// hydration for existing callers.
+	Lite bool
 }
 
 // SortPolicy determines how ready work is ordered
