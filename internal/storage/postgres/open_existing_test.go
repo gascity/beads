@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ func TestVerifyExistingSchema(t *testing.T) {
 		name    string
 		prepare func(sqlmock.Sqlmock)
 		want    string
+		repair  bool
 	}{
 		{
 			name: "provisioned schema succeeds with reads only",
@@ -21,6 +23,7 @@ func TestVerifyExistingSchema(t *testing.T) {
 				mock.ExpectQuery(regexp.QuoteMeta(existingSchemaVersionQuery)).
 					WithArgs(schemaVersionKey).
 					WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(schemaVersion))
+				expectExistingCapabilities(mock, true, true)
 			},
 		},
 		{
@@ -31,6 +34,23 @@ func TestVerifyExistingSchema(t *testing.T) {
 			want: "does not exist",
 		},
 		{
+			name: "missing metadata fails without repair classification",
+			prepare: func(mock sqlmock.Sqlmock) {
+				expectExistingSchema(mock, true, false)
+			},
+			want: "missing metadata table",
+		},
+		{
+			name: "missing version fails without repair classification",
+			prepare: func(mock sqlmock.Sqlmock) {
+				expectExistingSchema(mock, true, true)
+				mock.ExpectQuery(regexp.QuoteMeta(existingSchemaVersionQuery)).
+					WithArgs(schemaVersionKey).
+					WillReturnRows(sqlmock.NewRows([]string{"value"}))
+			},
+			want: "missing schema version",
+		},
+		{
 			name: "wrong version fails without migration",
 			prepare: func(mock sqlmock.Sqlmock) {
 				expectExistingSchema(mock, true, true)
@@ -39,6 +59,30 @@ func TestVerifyExistingSchema(t *testing.T) {
 					WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("wrong-version"))
 			},
 			want: "this binary requires " + schemaVersion,
+		},
+		{
+			name: "missing journal payload requests known legacy repair",
+			prepare: func(mock sqlmock.Sqlmock) {
+				expectExistingSchema(mock, true, true)
+				mock.ExpectQuery(regexp.QuoteMeta(existingSchemaVersionQuery)).
+					WithArgs(schemaVersionKey).
+					WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(schemaVersion))
+				expectExistingCapabilities(mock, false, true)
+			},
+			want:   "bd_events_journal.comment_json",
+			repair: true,
+		},
+		{
+			name: "missing event sequence requests known legacy repair",
+			prepare: func(mock sqlmock.Sqlmock) {
+				expectExistingSchema(mock, true, true)
+				mock.ExpectQuery(regexp.QuoteMeta(existingSchemaVersionQuery)).
+					WithArgs(schemaVersionKey).
+					WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(schemaVersion))
+				expectExistingCapabilities(mock, true, false)
+			},
+			want:   "bd_events_seq",
+			repair: true,
 		},
 	}
 
@@ -59,6 +103,9 @@ func TestVerifyExistingSchema(t *testing.T) {
 			} else if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("verifyExistingSchema error = %v, want %q", err, tt.want)
 			}
+			if got := errors.Is(err, ErrExistingSchemaNeedsRepair); got != tt.repair {
+				t.Fatalf("errors.Is(ErrExistingSchemaNeedsRepair) = %v, want %v (error %v)", got, tt.repair, err)
+			}
 			// No Exec expectation is registered. Any CREATE, ALTER, INSERT, or
 			// other DDL/DML issued by verification fails this recorder assertion.
 			if err := mock.ExpectationsWereMet(); err != nil {
@@ -66,6 +113,12 @@ func TestVerifyExistingSchema(t *testing.T) {
 			}
 		})
 	}
+}
+
+func expectExistingCapabilities(mock sqlmock.Sqlmock, journalPayload, eventSequence bool) {
+	mock.ExpectQuery(regexp.QuoteMeta(existingSchemaCapabilitiesQuery)).
+		WithArgs("workspace", "workspace").
+		WillReturnRows(sqlmock.NewRows([]string{"journal_payload", "event_sequence"}).AddRow(journalPayload, eventSequence))
 }
 
 func expectExistingSchema(mock sqlmock.Sqlmock, schemaExists, metadataExists bool) {

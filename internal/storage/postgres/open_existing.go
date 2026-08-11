@@ -21,6 +21,33 @@ const existingMetadataTableQuery = `SELECT EXISTS (
 
 const existingSchemaVersionQuery = `SELECT value FROM metadata WHERE key = $1`
 
+const existingSchemaCapabilitiesQuery = `SELECT
+	EXISTS (
+		SELECT 1
+		FROM pg_catalog.pg_class AS c
+		JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+		JOIN pg_catalog.pg_attribute AS a ON a.attrelid = c.oid
+		WHERE n.nspname = $1
+		  AND c.relname = 'bd_events_journal'
+		  AND c.relkind IN ('r', 'p')
+		  AND a.attname = 'comment_json'
+		  AND a.attnum > 0
+		  AND NOT a.attisdropped
+	),
+	EXISTS (
+		SELECT 1
+		FROM pg_catalog.pg_class AS c
+		JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+		WHERE n.nspname = $2
+		  AND c.relname = 'bd_events_seq'
+		  AND c.relkind IN ('r', 'p')
+	)`
+
+// ErrExistingSchemaNeedsRepair identifies a schema stamped with the current
+// version that is missing a known legacy capability. Callers may explicitly
+// route only this error through the provisioning/repair opener.
+var ErrExistingSchemaNeedsRepair = errors.New("postgres: existing schema needs known legacy repair")
+
 // OpenExisting opens an already-provisioned Postgres workspace without applying
 // DDL, seeds, migrations, or version stamps. It validates the schema version
 // using SELECT-only checks, then pings the returned store before handing it to
@@ -89,7 +116,17 @@ func verifyExistingSchema(ctx context.Context, db *sql.DB, schema string) error 
 		return fmt.Errorf("postgres: read workspace schema version: %w", err)
 	case stored != schemaVersion:
 		return fmt.Errorf("postgres: workspace schema version %s, this binary requires %s", stored, schemaVersion)
-	default:
-		return nil
 	}
+
+	var journalPayload, eventSequence bool
+	if err := db.QueryRowContext(ctx, existingSchemaCapabilitiesQuery, schema, schema).Scan(&journalPayload, &eventSequence); err != nil {
+		return fmt.Errorf("postgres: inspect workspace schema capabilities: %w", err)
+	}
+	if !journalPayload {
+		return fmt.Errorf("%w: missing bd_events_journal.comment_json", ErrExistingSchemaNeedsRepair)
+	}
+	if !eventSequence {
+		return fmt.Errorf("%w: missing bd_events_seq", ErrExistingSchemaNeedsRepair)
+	}
+	return nil
 }

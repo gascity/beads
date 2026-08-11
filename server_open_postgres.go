@@ -32,6 +32,11 @@ type PostgresServerConfig struct {
 	EventsJournal bool
 }
 
+// ErrPostgresExistingSchemaNeedsRepair identifies a current-version Postgres
+// schema that is missing a known legacy capability. Callers may use errors.Is
+// to route only this error through OpenServerPostgres for repair.
+var ErrPostgresExistingSchemaNeedsRepair = postgres.ErrExistingSchemaNeedsRepair
+
 // OpenServerPostgres opens the beads engine against an external Postgres
 // server, the Postgres sibling of OpenServer. No .beads directory,
 // metadata.json, or credentials file is involved. Provisioning is implicit and
