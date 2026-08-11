@@ -72,6 +72,11 @@ func TestSearchIssuesKeepsReadTransactionOutsidePostgresLiteDurablePath(t *testi
 			filter:  types.IssueFilter{Lite: true, SkipWisps: true, SkipLabels: true},
 		},
 		{
+			name:    "mysql lite",
+			dialect: "mysql",
+			filter:  types.IssueFilter{Lite: true, SkipWisps: true, SkipLabels: true},
+		},
+		{
 			name:    "postgres full",
 			dialect: "postgres",
 			filter:  types.IssueFilter{SkipWisps: true, SkipLabels: true},
