@@ -12,6 +12,7 @@ import (
 // current UTC time. issueops verifies the issue exists and wisp-routes.
 func (s *Store) AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error) {
 	var result *types.Comment
+	ctx = s.journalContext(ctx)
 	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		var e error
 		result, e = issueops.AddIssueCommentInTx(ctx, tx, issueID, author, text)

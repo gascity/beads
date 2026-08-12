@@ -90,5 +90,12 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 		return nil, fmt.Errorf("recompute is_blocked after close for %s: %w", id, err)
 	}
 
+	// Journal the close in the same transaction. Only reached when a row was
+	// actually closed (the already-closed path returns earlier). Covers both
+	// CloseIssueInTx and CloseIssueWithoutEventInTx (both delegate here).
+	if err := RecordEventInTx(ctx, tx, EventClose, id); err != nil {
+		return nil, err
+	}
+
 	return &CloseResult{IsWisp: isWisp}, nil
 }

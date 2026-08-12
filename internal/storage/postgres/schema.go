@@ -437,6 +437,35 @@ CREATE TABLE IF NOT EXISTS repo_mtimes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_repo_mtimes_checked ON repo_mtimes (last_checked);
+
+-- ============================================================ events journal
+--
+-- This is deliberately ordinary PostgreSQL DDL, not a trigger: the shared
+-- issueops mutation seam writes the journal in the caller's transaction. The
+-- one-row counter serializes allocation, so a rolled-back mutation rolls back
+-- its counter increment as well and sequence numbers stay commit-visible and
+-- gapless.
+CREATE TABLE IF NOT EXISTS bd_events_journal (
+    seq          bigint NOT NULL PRIMARY KEY,
+    ts           timestamp(6) NOT NULL,
+    op           text NOT NULL,
+    issue_id     text NOT NULL,
+    issue_json   text,
+    dep_json     text,
+    comment_json text
+);
+
+ALTER TABLE bd_events_journal
+    ADD COLUMN IF NOT EXISTS comment_json text;
+
+CREATE INDEX IF NOT EXISTS idx_bd_events_journal_issue ON bd_events_journal (issue_id);
+
+CREATE TABLE IF NOT EXISTS bd_events_seq (
+    id       integer NOT NULL PRIMARY KEY CHECK (id = 0),
+    next_seq bigint NOT NULL
+);
+
+INSERT INTO bd_events_seq (id, next_seq) VALUES (0, 0) ON CONFLICT (id) DO NOTHING;
 `
 
 // schemaVersion is stamped into the metadata table by InitSchema. A workspace

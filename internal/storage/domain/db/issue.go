@@ -67,11 +67,14 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	if err := insertIssueRow(ctx, r.runner, table, issue); err != nil {
 		return err
 	}
-	return r.events.Record(ctx, domain.Event{
+	if err := r.events.Record(ctx, domain.Event{
 		IssueID: issue.ID,
 		Type:    types.EventCreated,
 		Actor:   actor,
-	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable})
+	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
+		return err
+	}
+	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID)
 }
 
 func (r *issueSQLRepositoryImpl) InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts domain.InsertIssueOpts) error {
@@ -190,7 +193,7 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 			}
 		}
 	}
-	return nil
+	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, id)
 }
 
 func coerceStatus(v any) types.Status {
@@ -274,6 +277,9 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 		NewValue: string(newData),
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: record event: %w", id, err)
+	}
+	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, id); err != nil {
+		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: record journal: %w", id, err)
 	}
 
 	return domain.ClaimRowResult{
@@ -654,6 +660,9 @@ func (r *issueSQLRepositoryImpl) Delete(ctx context.Context, id string, opts dom
 	if opts.UseWispsTable {
 		table = "wisps"
 	}
+	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, []string{id}); err != nil {
+		return fmt.Errorf("db: IssueSQLRepository.Delete journal dependencies for %s: %w", id, err)
+	}
 	//nolint:gosec // G201: table is a hardcoded constant.
 	res, err := r.runner.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ?", table), id)
 	if err != nil {
@@ -666,7 +675,7 @@ func (r *issueSQLRepositoryImpl) Delete(ctx context.Context, id string, opts dom
 	if rows == 0 {
 		return fmt.Errorf("issue not found: %s", id)
 	}
-	return nil
+	return issueops.RecordDeleteInTx(ctx, r.runner, id)
 }
 
 func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, opts domain.IssueTableOpts) (int, error) {
@@ -677,13 +686,23 @@ func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, 
 	if opts.UseWispsTable {
 		table = "wisps"
 	}
+	actualIDs, err := issueops.ExistingIssueIDsInTableInTx(ctx, r.runner, table, ids)
+	if err != nil {
+		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs resolve existing rows from %s: %w", table, err)
+	}
+	if len(actualIDs) == 0 {
+		return 0, nil
+	}
+	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, actualIDs); err != nil {
+		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs journal dependencies from %s: %w", table, err)
+	}
 	total := 0
-	for start := 0; start < len(ids); start += deleteBatchSize {
+	for start := 0; start < len(actualIDs); start += deleteBatchSize {
 		end := start + deleteBatchSize
-		if end > len(ids) {
-			end = len(ids)
+		if end > len(actualIDs) {
+			end = len(actualIDs)
 		}
-		batch := ids[start:end]
+		batch := actualIDs[start:end]
 		placeholders := make([]string, len(batch))
 		args := make([]any, len(batch))
 		for i, id := range batch {
@@ -702,6 +721,11 @@ func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, 
 			return total, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs rows affected: %w", err)
 		}
 		total += int(n)
+	}
+	for _, id := range actualIDs {
+		if err := issueops.RecordDeleteInTx(ctx, r.runner, id); err != nil {
+			return total, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs journal delete %s: %w", id, err)
+		}
 	}
 	return total, nil
 }

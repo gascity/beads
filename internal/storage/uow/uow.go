@@ -19,6 +19,7 @@ type UnitOfWork interface {
 	DependencyUseCase() domain.DependencyUseCase
 	LabelUseCase() domain.LabelUseCase
 	CommentUseCase() domain.CommentUseCase
+	EventsJournalUseCase() domain.EventsJournalUseCase
 }
 
 type UnitOfWorkProvider interface {
@@ -45,6 +46,7 @@ type baseUOW struct {
 	dependencyUseCase domain.DependencyUseCase
 	labelUseCase      domain.LabelUseCase
 	commentUseCase    domain.CommentUseCase
+	journalUseCase    domain.EventsJournalUseCase
 }
 
 func (u *baseUOW) Commit(ctx context.Context, message string) error {
@@ -116,4 +118,11 @@ func (u *baseUOW) CommentUseCase() domain.CommentUseCase {
 		u.commentUseCase = domain.NewCommentUseCase(db.NewCommentSQLRepository(u.tx.Runner()))
 	}
 	return u.commentUseCase
+}
+
+func (u *baseUOW) EventsJournalUseCase() domain.EventsJournalUseCase {
+	if u.journalUseCase == nil {
+		u.journalUseCase = domain.NewEventsJournalUseCase(db.NewEventsJournalSQLRepository(u.tx.Runner()))
+	}
+	return u.journalUseCase
 }

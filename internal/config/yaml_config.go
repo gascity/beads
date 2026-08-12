@@ -22,8 +22,11 @@ import (
 // at startup, not from the database).
 var YamlOnlyKeys = map[string]bool{
 	// Bootstrap flags (affect how bd starts)
-	"no-db": true,
-	"json":  true,
+	"no-db":                      true,
+	"json":                       true,
+	"events-journal":             true,
+	"events-journal-retain-days": true,
+	"events-journal-retain-rows": true,
 
 	// Database and identity
 	"db":       true,

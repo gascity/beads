@@ -223,6 +223,43 @@ type RawDBAccessor interface {
 	UnderlyingDB() *sql.DB
 }
 
+// EventsJournalRow is one raw bd_events_journal row surfaced to the
+// `bd events` CLI. IssueJSON is empty when the op is a delete (no surviving
+// row); DepJSON is empty for non-dependency ops; CommentJSON is empty for
+// non-comment ops. TS is the insert-time timestamp
+// (stamped inside the committing transaction) normalized to a string.
+type EventsJournalRow struct {
+	Seq         int64
+	TS          string
+	Op          string
+	IssueID     string
+	IssueJSON   string
+	DepJSON     string
+	CommentJSON string
+}
+
+// EventsJournalAccessor reads and prunes the durable events journal
+// (bd_events_journal) through the store's own transaction machinery. Unlike
+// RawDBAccessor — which only the server-mode store provides — this works on the
+// embedded store too, which owns its connections and exposes no stable *sql.DB.
+// Callers that need the journal should type-assert to this interface.
+type EventsJournalAccessor interface {
+	// ReadEventsJournal returns rows with seq greater than since, ordered by
+	// seq ascending, optionally capped by limit (0 = no cap).
+	ReadEventsJournal(ctx context.Context, since int64, limit int) ([]EventsJournalRow, error)
+	// PruneEventsJournal deletes rows with seq below before, honoring the
+	// retain-days / retain-rows floors (0 = floor disabled), and returns the
+	// number of rows deleted.
+	PruneEventsJournal(ctx context.Context, before int64, retainDays, retainRows int) (int64, error)
+}
+
+// EventsJournalConfigurer controls journal activation on one storage instance.
+// Implementations must never use process-global state: Hosted serves multiple
+// project stores concurrently in one process.
+type EventsJournalConfigurer interface {
+	SetEventsJournalEnabled(enabled bool)
+}
+
 // StoreLocator provides filesystem path information for the store.
 // Callers that need the store's on-disk location should type-assert to this interface.
 type StoreLocator interface {

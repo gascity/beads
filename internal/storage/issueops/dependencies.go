@@ -200,7 +200,9 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 				metadata, dep.IssueID, dep.DependsOnID); err != nil {
 				return fmt.Errorf("failed to update dependency metadata: %w", err)
 			}
-			return nil
+			// A same-type add refreshes edge metadata. It is an observable graph
+			// mutation, so emit the complete replacement edge for replay.
+			return RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
 		}
 		return fmt.Errorf("dependency %s -> %s already exists with type %q (requested %q); remove it first with 'bd dep remove' then re-add",
 			dep.IssueID, dep.DependsOnID, existingType, dep.Type)
@@ -243,12 +245,13 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 			return fmt.Errorf("recompute is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 		}
-		return nil
+		return RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
 	}
 	if err := MarkIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("mark is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 	}
-	return nil
+	// Snapshot only after all derived blocked-state maintenance has completed.
+	return RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
 }
 
 // RemoveSourceFromAffected drops the dep source from the affected-ID sets
@@ -708,11 +711,11 @@ func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID 
 
 	// Capture the row's type before deleting so we can dispatch the right
 	// affected-set helper. If no row matches, treat as a no-op.
-	var depType string
+	var depType, metadata string
 	row := tx.QueryRowContext(ctx, fmt.Sprintf(
-		`SELECT type FROM %s WHERE issue_id = ? AND %s = ?`, depTable, DepTargetExpr),
+		`SELECT type, metadata FROM %s WHERE issue_id = ? AND %s = ?`, depTable, DepTargetExpr),
 		issueID, dependsOnID)
-	if err := row.Scan(&depType); err != nil {
+	if err := row.Scan(&depType, &metadata); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -738,7 +741,8 @@ func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID 
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("recompute is_blocked after remove dependency %s -> %s: %w", issueID, dependsOnID, err)
 	}
-	return nil
+	// Snapshot only after all derived blocked-state maintenance has completed.
+	return RecordDepEventInTx(ctx, tx, EventDepRemove, issueID, depType, dependsOnID, metadata)
 }
 
 // GetIssuesByIDsInTx retrieves multiple issues by ID within an existing

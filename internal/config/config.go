@@ -173,6 +173,15 @@ func Initialize() error {
 	v.SetDefault("events-export", false)
 	v.SetDefault("no-db", false)
 	v.SetDefault("no-hooks", false)
+	// Durable events journal (bd_events_journal table). OFF by default;
+	// enable per-workspace via `bd config set events-journal true` or
+	// BD_EVENTS_JOURNAL=1. Read it with `bd events tail/export`.
+	v.SetDefault("events-journal", false)
+	// Retention floors for `bd events prune`. 0 disables a floor. retain-days
+	// keeps rows younger than N days; retain-rows always keeps the newest N rows.
+	// Env: BD_EVENTS_JOURNAL_RETAIN_DAYS / BD_EVENTS_JOURNAL_RETAIN_ROWS.
+	v.SetDefault("events-journal-retain-days", 0)
+	v.SetDefault("events-journal-retain-rows", 0)
 	v.SetDefault("db", "")
 	v.SetDefault("actor", "")
 	v.SetDefault("issue-prefix", "")

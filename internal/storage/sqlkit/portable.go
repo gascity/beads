@@ -146,6 +146,7 @@ func (s *Store) FindWispDependentsRecursive(ctx context.Context, ids []string) (
 // --- Comment / audit writes ---
 
 func (s *Store) AddComment(ctx context.Context, issueID, actor, comment string) error {
+	ctx = s.journalContext(ctx)
 	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		return issueops.AddCommentEventInTx(ctx, tx, issueID, actor, comment)
 	})
@@ -153,6 +154,7 @@ func (s *Store) AddComment(ctx context.Context, issueID, actor, comment string) 
 
 func (s *Store) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
 	var out *types.Comment
+	ctx = s.journalContext(ctx)
 	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		var e error
 		out, e = issueops.ImportIssueCommentInTx(ctx, tx, issueID, author, text, createdAt)
@@ -164,12 +166,14 @@ func (s *Store) ImportIssueComment(ctx context.Context, issueID, author, text st
 // --- Id rekey / wisp promote / source-repo purge ---
 
 func (s *Store) UpdateIssueID(ctx context.Context, oldID, newID string, issue *types.Issue, actor string) error {
+	ctx = s.journalContext(ctx)
 	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		return issueops.UpdateIssueIDInTx(ctx, tx, oldID, newID, issue, actor)
 	})
 }
 
 func (s *Store) PromoteFromEphemeral(ctx context.Context, id, actor string) error {
+	ctx = s.journalContext(ctx)
 	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		return issueops.PromoteFromEphemeralInTx(ctx, tx, id, actor)
 	})
@@ -177,6 +181,7 @@ func (s *Store) PromoteFromEphemeral(ctx context.Context, id, actor string) erro
 
 func (s *Store) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo string) (int, error) {
 	var count int
+	ctx = s.journalContext(ctx)
 	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		var e error
 		count, e = issueops.DeleteIssuesBySourceRepoInTx(ctx, tx, sourceRepo)
@@ -196,6 +201,7 @@ func (s *Store) CreateIssuesWithFullOptions(ctx context.Context, issues []*types
 	if len(issues) == 0 {
 		return nil
 	}
+	ctx = s.journalContext(ctx)
 	if issueops.AllWisps(issues) {
 		for _, issue := range issues {
 			if !issue.NoHistory {

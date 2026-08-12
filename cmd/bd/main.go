@@ -1105,6 +1105,15 @@ var rootCmd = &cobra.Command{
 		}
 		doltCfg.SyncRemote = resolveSyncRemote()
 
+		journalEnabled := eventsJournalEnabled()
+		backend := configfile.BackendDolt
+		if cfg != nil {
+			backend = cfg.GetBackend()
+		}
+		if err := validateEventsJournalBackend(backend, journalEnabled); err != nil {
+			return HandleError("%v", err)
+		}
+
 		// --global flag: switch to the global shared-server database.
 		// Must be in shared-server mode; errors otherwise.
 		if globalFlag {
@@ -1125,6 +1134,7 @@ var rootCmd = &cobra.Command{
 		// travel the ordinary store path — exercising exactly the adapter this
 		// spike is proving. Default (unset) keeps the original short-circuit.
 		if proxiedServerMode && !spikeUOWStore() {
+			rootCtx = withConfiguredEventsJournal(rootCtx, journalEnabled)
 			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir)
 			if err != nil {
 				return HandleError("failed to open uow provider: %v", err)
@@ -1203,6 +1213,11 @@ var rootCmd = &cobra.Command{
 				os.Exit(1)
 			}
 			return HandleError("failed to open database: %v", err)
+		}
+		if err := configureEventsJournalStore(store, journalEnabled); err != nil {
+			_ = store.Close()
+			store = nil
+			return HandleError("configuring events journal: %v", err)
 		}
 
 		// Mark store as active for flush goroutine safety

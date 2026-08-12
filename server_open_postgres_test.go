@@ -170,6 +170,81 @@ func TestOpenServerPostgres(t *testing.T) {
 	})
 }
 
+func TestOpenExistingServerPostgresValidation(t *testing.T) {
+	for _, cfg := range []PostgresServerConfig{{Schema: "workspace"}, {DSN: "postgres://x"}} {
+		if _, err := OpenExistingServerPostgres(context.Background(), cfg); err == nil {
+			t.Fatalf("OpenExistingServerPostgres(%+v) succeeded", cfg)
+		}
+	}
+}
+
+// TestOpenServerPostgresEventsJournalIsProjectScoped proves Hosted enables the
+// durable journal on the explicitly selected project only. Opening another
+// project in the same process must not inherit that activation.
+func TestOpenServerPostgresEventsJournalIsProjectScoped(t *testing.T) {
+	url := pgTestURL(t)
+	ctx := context.Background()
+	enabledSchema := uniquePGSchema("open_journal_enabled")
+	disabledSchema := uniquePGSchema("open_journal_disabled")
+	t.Cleanup(func() {
+		dropPGSchema(url, enabledSchema)
+		dropPGSchema(url, disabledSchema)
+	})
+
+	enabled, err := OpenServerPostgres(ctx, PostgresServerConfig{
+		DSN: url, Schema: enabledSchema, EventsJournal: true,
+	})
+	if err != nil {
+		t.Fatalf("OpenServerPostgres(enabled): %v", err)
+	}
+	defer func() { _ = enabled.Close() }()
+	disabled, err := OpenServerPostgres(ctx, PostgresServerConfig{DSN: url, Schema: disabledSchema})
+	if err != nil {
+		t.Fatalf("OpenServerPostgres(disabled): %v", err)
+	}
+	defer func() { _ = disabled.Close() }()
+
+	enabledJournal, ok := enabled.(EventsJournalAccessor)
+	if !ok {
+		t.Fatal("OpenServerPostgres result does not expose the public events-journal capability")
+	}
+	disabledJournal, ok := disabled.(EventsJournalAccessor)
+	if !ok {
+		t.Fatal("disabled OpenServerPostgres result does not expose the public events-journal capability")
+	}
+	enabledStore := enabled.(storage.DoltStorage)
+	disabledStore := disabled.(storage.DoltStorage)
+	for _, tc := range []struct {
+		name  string
+		store storage.DoltStorage
+	}{
+		{"enabled", enabledStore},
+		{"disabled", disabledStore},
+	} {
+		if err := tc.store.SetConfig(ctx, "issue_prefix", tc.name); err != nil {
+			t.Fatalf("SetConfig(%s): %v", tc.name, err)
+		}
+		if err := tc.store.CreateIssue(ctx, &types.Issue{ID: tc.name + "-1", Title: tc.name, IssueType: "task", Status: types.StatusOpen, Priority: 2}, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", tc.name, err)
+		}
+	}
+
+	rows, err := enabledJournal.ReadEventsJournal(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("enabled ReadEventsJournal: %v", err)
+	}
+	if len(rows) != 1 || rows[0].IssueID != "enabled-1" {
+		t.Fatalf("enabled journal rows = %#v, want its one project-local mutation", rows)
+	}
+	rows, err = disabledJournal.ReadEventsJournal(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("disabled ReadEventsJournal: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("disabled project inherited journal activation: %#v", rows)
+	}
+}
+
 // TestConformanceViaOpenServerPostgres runs the backend-agnostic storage
 // conformance suite through the *hosted* entrypoint (OpenServerPostgres) rather
 // than the internal postgres package the CI already covers, certifying the public

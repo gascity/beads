@@ -149,6 +149,13 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 		return result, err
 	}
 	result.ChangedTables = mergeChangedTables(result.ChangedTables, commentResult.ChangedTables)
+
+	// The issue, labels, and comments above are one create mutation. Journal
+	// the completed post-mutation state only after every constituent write has
+	// succeeded, while still inside the caller's transaction.
+	if err := RecordEventInTx(ctx, tx, EventCreate, issue.ID); err != nil {
+		return result, err
+	}
 	return result, nil
 }
 
@@ -731,6 +738,11 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 			}
 			if rowsAffected > 0 {
 				result.markChanged(depTable)
+				// Creation-time edges are independently replayable operations; do
+				// not rely on the issue create payload's inline dependencies.
+				if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, dep.Metadata); err != nil {
+					return result, err
+				}
 			}
 		}
 	}

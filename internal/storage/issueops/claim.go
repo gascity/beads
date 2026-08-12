@@ -116,6 +116,14 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 		return nil, fmt.Errorf("failed to record claim event: %w", err)
 	}
 
+	// Journal the claim as an update. Reached only on a real claim (the
+	// idempotent same-actor re-claim returns earlier without a row change).
+	// ClaimReadyIssueInTx claims through this function, so `bd ready --claim` is
+	// covered here too.
+	if err := RecordEventInTx(ctx, tx, EventUpdate, id); err != nil {
+		return nil, err
+	}
+
 	return &ClaimResult{OldIssue: oldIssue, IsWisp: isWisp}, nil
 }
 

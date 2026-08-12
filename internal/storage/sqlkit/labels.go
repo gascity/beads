@@ -12,6 +12,7 @@ import (
 // auto-route between the permanent and wisp label/event tables. Labels cannot
 // change is_blocked, so this uses withWriteTx.
 func (s *Store) AddLabel(ctx context.Context, issueID, label, actor string) error {
+	ctx = s.journalContext(ctx)
 	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		return issueops.AddLabelInTx(ctx, tx, "", "", issueID, label, actor)
 	})
@@ -19,6 +20,7 @@ func (s *Store) AddLabel(ctx context.Context, issueID, label, actor string) erro
 
 // RemoveLabel removes a label from an issue. issueops handles wisp routing.
 func (s *Store) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
+	ctx = s.journalContext(ctx)
 	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		return issueops.RemoveLabelInTx(ctx, tx, "", "", issueID, label, actor)
 	})

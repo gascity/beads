@@ -64,6 +64,8 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 		if err != nil {
 			return fmt.Errorf("failed to begin transaction: %w", err)
 		}
+		clearJournalScope := s.scopeEventsJournalTransaction(tx)
+		defer clearJournalScope()
 		defer func() { _ = tx.Rollback() }()
 		if err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID); err != nil {
 			return err
@@ -75,6 +77,8 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
 	defer func() { _ = tx.Rollback() }()
 
 	if err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID); err != nil {

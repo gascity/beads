@@ -108,5 +108,10 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx *sql.Tx, id string, actor 
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("recompute is_blocked after promote for %s: %w", id, err)
 	}
+	// Journal the promotion as an update: the id survives, now a regular issue
+	// (the post-mutation snapshot reflects Ephemeral=false).
+	if err := RecordEventInTx(ctx, tx, EventUpdate, id); err != nil {
+		return err
+	}
 	return nil
 }

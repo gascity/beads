@@ -19,6 +19,15 @@ import (
 // Storage is the interface for beads storage operations
 type Storage = beads.Storage
 
+// EventsJournalAccessor is the stable public capability exposed by stores that
+// support the durable events journal. Hosted callers can type-assert the
+// Storage returned by OpenServerPostgres to this interface without importing an
+// internal package.
+type EventsJournalAccessor = storage.EventsJournalAccessor
+
+// EventsJournalRow is one committed, ordered journal record.
+type EventsJournalRow = storage.EventsJournalRow
+
 // Transaction provides atomic multi-operation support within a database transaction.
 // Use Storage.RunInTransaction() to obtain a Transaction instance.
 type Transaction = beads.Transaction

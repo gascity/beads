@@ -191,6 +191,8 @@ func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[strin
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
@@ -208,6 +210,8 @@ func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, act
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session); err != nil {
@@ -223,11 +227,16 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
 	defer func() { _ = tx.Rollback() }()
 
 	affectedIssues, affectedWisps, aerr := issueops.AffectedByDeletionInTx(ctx, tx, nil, []string{id})
 	if aerr != nil {
 		return fmt.Errorf("affected by wisp delete for %s: %w", id, aerr)
+	}
+	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, tx, []string{id}); err != nil {
+		return fmt.Errorf("journal dependency removals for wisp %s: %w", id, err)
 	}
 
 	result, err := tx.ExecContext(ctx, "DELETE FROM wisps WHERE id = ?", id)
@@ -241,6 +250,9 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 	}
 	if rows == 0 {
 		return fmt.Errorf("wisp not found: %s", id)
+	}
+	if err := issueops.RecordDeleteInTx(ctx, tx, id); err != nil {
+		return err
 	}
 
 	if err := issueops.DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
@@ -296,11 +308,24 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
 	defer func() { _ = tx.Rollback() }()
 
+	actualIDs, err := issueops.ExistingIssueIDsInTableInTx(ctx, tx, "wisps", ids)
+	if err != nil {
+		return 0, fmt.Errorf("resolve existing wisps for batch delete: %w", err)
+	}
+	if len(actualIDs) == 0 {
+		return 0, nil
+	}
+	ids = actualIDs
 	affectedIssues, affectedWisps, aerr := issueops.AffectedByDeletionInTx(ctx, tx, nil, ids)
 	if aerr != nil {
 		return 0, fmt.Errorf("affected by batched wisp delete: %w", aerr)
+	}
+	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, tx, ids); err != nil {
+		return 0, fmt.Errorf("journal dependency removals for batched wisp delete: %w", err)
 	}
 
 	inClause, args := doltBuildSQLInClause(ids)
@@ -313,6 +338,11 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 		return 0, fmt.Errorf("failed to batch delete wisps: %w", err)
 	}
 	rowsAffected, _ := result.RowsAffected()
+	for _, id := range ids {
+		if err := issueops.RecordDeleteInTx(ctx, tx, id); err != nil {
+			return 0, err
+		}
+	}
 
 	if err := issueops.DeleteWispsFromDependenciesInTx(ctx, tx, ids); err != nil {
 		return 0, err
@@ -337,6 +367,8 @@ func (s *DoltStore) claimWisp(ctx context.Context, id string, actor string) erro
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor); err != nil {
@@ -518,6 +550,8 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
 	defer func() { _ = tx.Rollback() }()
 
 	// Cycle detection for blocking dependency types: check if adding this edge
@@ -553,6 +587,9 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 			`, targetCol), metadata, dep.IssueID, dep.DependsOnID); err != nil {
 				return fmt.Errorf("failed to update wisp dependency metadata: %w", err)
 			}
+			if err := issueops.RecordDepEventInTx(ctx, tx, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata); err != nil {
+				return err
+			}
 			return wrapTransactionError("commit add wisp dependency", tx.Commit())
 		}
 		return fmt.Errorf("dependency %s -> %s already exists with type %q (requested %q); remove it first with 'bd dep remove' then re-add",
@@ -571,13 +608,15 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 	`, targetCol), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
 		return fmt.Errorf("failed to add wisp dependency: %w", err)
 	}
-
 	affectedIssues, affectedWisps, aerr := issueops.AffectedByDepChangeForWispInTx(ctx, tx, dep.IssueID, dep.DependsOnID, dep.Type)
 	if aerr != nil {
 		return fmt.Errorf("affected by add wisp dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, aerr)
 	}
 	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("recompute is_blocked after add wisp dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+	}
+	if err := issueops.RecordDepEventInTx(ctx, tx, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata); err != nil {
+		return err
 	}
 
 	return wrapTransactionError("commit add wisp dependency", tx.Commit())

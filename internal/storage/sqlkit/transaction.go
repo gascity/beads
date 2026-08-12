@@ -19,6 +19,7 @@ import (
 // commit-message residue and intentionally unused.
 func (s *Store) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
 	_ = commitMsg
+	ctx = s.journalContext(ctx)
 	return s.withMutationTx(ctx, func(tx *sql.Tx) error {
 		// withWriteTx rolls back on a returned error but not on a panic; guard
 		// it here so a panicking callback still releases the transaction.
@@ -206,27 +207,30 @@ func (t *sqlkitTx) CycleThroughEdges(ctx context.Context, edges [][2]string) (st
 	return issueops.CycleThroughEdgesInGraph(graph, edges), nil
 }
 
-// AddLabel adds a label with a bare INSERT IGNORE and no event row, mirroring
-// the Dolt reference transaction (dolt/transaction.go). Transaction label ops
-// are unevented on both backends; the evented store path lives in labels.go.
+// AddLabel adds a label without writing the user-facing events table. The
+// durable mutation journal still receives the post-mutation issue snapshot.
 func (t *sqlkitTx) AddLabel(ctx context.Context, issueID, label, actor string) error {
 	_, labelTable, _, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
 	//nolint:gosec // G201: labelTable is a fixed routing constant
-	_, err := t.tx.ExecContext(ctx, fmt.Sprintf(`
+	if _, err := t.tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)
-	`, labelTable), issueID, label)
-	return err
+	`, labelTable), issueID, label); err != nil {
+		return err
+	}
+	return issueops.RecordEventInTx(ctx, t.tx, issueops.EventUpdate, issueID)
 }
 
-// RemoveLabel removes a label with a bare DELETE and no event row, mirroring
-// the Dolt reference transaction (dolt/transaction.go).
+// RemoveLabel removes a label without writing the user-facing events table.
+// The durable mutation journal still receives the post-mutation issue snapshot.
 func (t *sqlkitTx) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
 	_, labelTable, _, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
 	//nolint:gosec // G201: labelTable is a fixed routing constant
-	_, err := t.tx.ExecContext(ctx, fmt.Sprintf(`
+	if _, err := t.tx.ExecContext(ctx, fmt.Sprintf(`
 		DELETE FROM %s WHERE issue_id = ? AND label = ?
-	`, labelTable), issueID, label)
-	return err
+	`, labelTable), issueID, label); err != nil {
+		return err
+	}
+	return issueops.RecordEventInTx(ctx, t.tx, issueops.EventUpdate, issueID)
 }
 
 // GetLabels returns an issue's labels; empty table arg auto-routes wisps.

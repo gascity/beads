@@ -69,6 +69,18 @@ func TestIsYamlOnlyKey(t *testing.T) {
 	}
 }
 
+func TestEventsJournalConfigIsStartupScoped(t *testing.T) {
+	for _, key := range []string{
+		"events-journal",
+		"events-journal-retain-days",
+		"events-journal-retain-rows",
+	} {
+		if !IsYamlOnlyKey(key) {
+			t.Errorf("%s must be stored in config.yaml so startup activation and retention read the value that config set writes", key)
+		}
+	}
+}
+
 func TestUpdateYamlKey(t *testing.T) {
 	tests := []struct {
 		name     string

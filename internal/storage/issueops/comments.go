@@ -144,13 +144,19 @@ func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, te
 		return nil, fmt.Errorf("add comment to %s: %w", commentTable, err)
 	}
 
-	return &types.Comment{
+	comment := &types.Comment{
 		ID:        id,
 		IssueID:   issueID,
 		Author:    author,
 		Text:      text,
 		CreatedAt: createdAt,
-	}, nil
+	}
+	if err := RecordCommentEventInTx(ctx, tx, issueID, &EventComment{
+		ID: id, Author: author, Text: text, CreatedAt: createdAt, Source: "structured",
+	}); err != nil {
+		return nil, err
+	}
+	return comment, nil
 }
 
 // AddCommentEventInTx adds a comment as an event to an issue within a transaction.
@@ -160,12 +166,16 @@ func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, te
 func AddCommentEventInTx(ctx context.Context, tx DBTX, issueID, actor, comment string) error {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	_, _, eventTable, _ := WispTableRouting(isWisp)
+	id := NewEventID()
+	createdAt := time.Now().UTC().Truncate(time.Second)
 
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?, ?)
-	`, eventTable), NewEventID(), issueID, types.EventCommented, actor, comment); err != nil {
+		INSERT INTO %s (id, issue_id, event_type, actor, comment, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, eventTable), id, issueID, types.EventCommented, actor, comment, createdAt); err != nil {
 		return fmt.Errorf("add comment event to %s: %w", eventTable, err)
 	}
-	return nil
+	return RecordCommentEventInTx(ctx, tx, issueID, &EventComment{
+		ID: id, Author: actor, Text: comment, CreatedAt: createdAt, Source: "audit",
+	})
 }

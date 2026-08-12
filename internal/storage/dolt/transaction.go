@@ -98,42 +98,67 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 		return fmt.Errorf("failed to begin regular tx: %w", err)
 	}
 
-	ignoredDB, ignoredConn, ignoredTx, err := s.beginIgnoredTxOnBranch(ctx, currentBranch)
-	if err != nil {
-		_ = regularTx.Rollback()
-		return err
+	// The journal counter and rows must commit in the same SQL transaction as
+	// every mutation they describe. In journal mode, use the pinned transaction
+	// for both regular and dolt-ignored tables; otherwise a mixed durable+wisp
+	// callback makes the two transactions contend with each other on
+	// bd_events_seq, and the ignored commit can fail after the regular side has
+	// already committed. The default journal-off path keeps the established
+	// split transactions.
+	journalEnabled := s.eventsJournalEnabled.Load()
+	ignoredTx := regularTx
+	var ignoredDB *sql.DB
+	var ignoredConn *sql.Conn
+	if !journalEnabled {
+		ignoredDB, ignoredConn, ignoredTx, err = s.beginIgnoredTxOnBranch(ctx, currentBranch)
+		if err != nil {
+			_ = regularTx.Rollback()
+			return err
+		}
+		defer ignoredDB.Close()
+		defer ignoredConn.Close()
 	}
-	defer ignoredDB.Close()
-	defer ignoredConn.Close()
+	clearRegularJournalScope := issueops.ScopeEventsJournalTransaction(regularTx, journalEnabled)
+	defer clearRegularJournalScope()
 
 	tx := &doltTransaction{regularTx: regularTx, ignoredTx: ignoredTx, store: s}
 
 	defer func() {
 		if r := recover(); r != nil {
 			_ = regularTx.Rollback()
-			_ = ignoredTx.Rollback()
+			if !journalEnabled {
+				_ = ignoredTx.Rollback()
+			}
 			panic(r)
 		}
 	}()
 
 	if err := fn(tx); err != nil {
 		_ = regularTx.Rollback()
-		_ = ignoredTx.Rollback()
+		if !journalEnabled {
+			_ = ignoredTx.Rollback()
+		}
 		return err
 	}
 
 	if err := regularTx.Commit(); err != nil {
-		_ = ignoredTx.Rollback()
+		if !journalEnabled {
+			_ = ignoredTx.Rollback()
+		}
 		return fmt.Errorf("sql commit (regular): %w", err)
 	}
 
 	if err := versioncontrolops.StageAndCommit(ctx, conn, tx.dirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
-		_ = ignoredTx.Rollback()
+		if !journalEnabled {
+			_ = ignoredTx.Rollback()
+		}
 		return err
 	}
 
-	if err := ignoredTx.Commit(); err != nil {
-		return fmt.Errorf("sql commit (ignored, regular already committed): %w", err)
+	if !journalEnabled {
+		if err := ignoredTx.Commit(); err != nil {
+			return fmt.Errorf("sql commit (ignored, regular already committed): %w", err)
+		}
 	}
 	return nil
 }
@@ -784,10 +809,14 @@ func (t *doltTransaction) AddLabel(ctx context.Context, issueID, label, actor st
 	_, err := t.txFor(table).ExecContext(ctx, fmt.Sprintf(`
 		INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)
 	`, table), issueID, label)
-	if err == nil {
-		t.dirty.MarkDirty(table)
+	if err != nil {
+		return wrapExecError("add label in tx", err)
 	}
-	return wrapExecError("add label in tx", err)
+	t.dirty.MarkDirty(table)
+	if err := issueops.RecordEventInTx(ctx, t.txFor(table), issueops.EventUpdate, issueID); err != nil {
+		return wrapExecError("journal label add in tx", err)
+	}
+	return nil
 }
 
 func (t *doltTransaction) GetLabels(ctx context.Context, issueID string) ([]string, error) {
@@ -824,10 +853,14 @@ func (t *doltTransaction) RemoveLabel(ctx context.Context, issueID, label, actor
 	_, err := t.txFor(table).ExecContext(ctx, fmt.Sprintf(`
 		DELETE FROM %s WHERE issue_id = ? AND label = ?
 	`, table), issueID, label)
-	if err == nil {
-		t.dirty.MarkDirty(table)
+	if err != nil {
+		return wrapExecError("remove label in tx", err)
 	}
-	return wrapExecError("remove label in tx", err)
+	t.dirty.MarkDirty(table)
+	if err := issueops.RecordEventInTx(ctx, t.txFor(table), issueops.EventUpdate, issueID); err != nil {
+		return wrapExecError("journal label remove in tx", err)
+	}
+	return nil
 }
 
 // SetConfig sets a config value within the transaction

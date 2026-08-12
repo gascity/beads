@@ -54,6 +54,7 @@ func (s *Store) GetNewlyUnblockedByClose(ctx context.Context, closedIssueID stri
 // only if it is currently unassigned. Runs in a mutation tx so the claim and its
 // is_blocked reprojection commit atomically.
 func (s *Store) ClaimIssue(ctx context.Context, id string, actor string) error {
+	ctx = s.journalContext(ctx)
 	return s.withMutationTx(ctx, func(tx *sql.Tx) error {
 		_, err := issueops.ClaimIssueInTx(ctx, tx, id, actor)
 		return err
@@ -64,6 +65,7 @@ func (s *Store) ClaimIssue(ctx context.Context, id string, actor string) error {
 // returns (nil, nil) when nothing is ready.
 func (s *Store) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (*types.Issue, error) {
 	var claimed *types.Issue
+	ctx = s.journalContext(ctx)
 	err := s.withMutationTx(ctx, func(tx *sql.Tx) error {
 		var e error
 		claimed, e = issueops.ClaimReadyIssueInTx(ctx, tx, filter, actor)
@@ -85,6 +87,7 @@ func (s *Store) DeleteIssues(ctx context.Context, ids []string, cascade bool, fo
 		return &types.DeleteIssuesResult{}, nil
 	}
 	var result *types.DeleteIssuesResult
+	ctx = s.journalContext(ctx)
 	err := s.withMutationTx(ctx, func(tx *sql.Tx) error {
 		r, e := issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, dryRun)
 		result = r
@@ -97,6 +100,7 @@ func (s *Store) DeleteIssues(ctx context.Context, ids []string, cascade bool, fo
 // bumping the child_counters row in the same tx.
 func (s *Store) GetNextChildID(ctx context.Context, parentID string) (string, error) {
 	var childID string
+	ctx = s.journalContext(ctx)
 	err := s.withMutationTx(ctx, func(tx *sql.Tx) error {
 		var e error
 		childID, e = issueops.GetNextChildIDTx(ctx, tx, parentID)

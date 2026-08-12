@@ -28,6 +28,9 @@ type Store struct {
 	dialect   Dialect
 	readiness ReadinessStrategy
 	claim     ClaimStrategy
+	// eventsJournalEnabled is intentionally per Store, never process-global:
+	// Hosted may serve several project schemas from one process.
+	eventsJournalEnabled atomic.Bool
 
 	closed atomic.Bool
 }
@@ -57,6 +60,15 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 
 // DB exposes the underlying pool for diagnostics/migrations.
 func (s *Store) DB() *sql.DB { return s.db }
+
+// SetEventsJournalEnabled activates the journal for this store instance only.
+// It is used by the Hosted OpenServerPostgres entry point; ordinary CLI/config
+// opens remain safe-off unless their own store explicitly opts in.
+func (s *Store) SetEventsJournalEnabled(enabled bool) { s.eventsJournalEnabled.Store(enabled) }
+
+func (s *Store) journalContext(ctx context.Context) context.Context {
+	return issueops.WithEventsJournal(ctx, s.eventsJournalEnabled.Load())
+}
 
 // DialectName reports the backend's dialect ("postgres", "sqlite", …).
 func (s *Store) DialectName() string { return s.dialect.Name() }
@@ -92,6 +104,8 @@ func (s *Store) withWriteTx(ctx context.Context, fn func(tx *sql.Tx) error) erro
 	if err != nil {
 		return fmt.Errorf("begin write tx: %w", err)
 	}
+	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+	defer clearJournalScope()
 	// A panicking callback must not pin the pooled connection; Rollback after
 	// Commit (or the explicit Rollback below) is a no-op.
 	defer func() { _ = tx.Rollback() }()
@@ -107,6 +121,7 @@ func (s *Store) withWriteTx(ctx context.Context, fn func(tx *sql.Tx) error) erro
 // withMutationTx runs fn then the readiness strategy in ONE transaction, so an
 // issue/dependency mutation and its is_blocked reprojection commit atomically.
 func (s *Store) withMutationTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	ctx = issueops.WithEventsJournal(ctx, s.eventsJournalEnabled.Load())
 	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		if err := fn(tx); err != nil {
 			return err
@@ -176,6 +191,7 @@ func (s *Store) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*t
 
 // CloseIssue closes an issue and reprojects blocked-ness in the same tx.
 func (s *Store) CloseIssue(ctx context.Context, id, reason, actor, session string) error {
+	ctx = s.journalContext(ctx)
 	return s.withMutationTx(ctx, func(tx *sql.Tx) error {
 		_, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session)
 		return err

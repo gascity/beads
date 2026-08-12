@@ -76,4 +76,5 @@ func (s *Store) CommitMergeResolution(_ context.Context, _ string) error { retur
 var (
 	_ storage.DoltStorage           = (*Store)(nil)
 	_ storage.NonCommitGraphBackend = (*Store)(nil)
+	_ storage.EventsJournalAccessor = (*Store)(nil)
 )

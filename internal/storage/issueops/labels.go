@@ -89,6 +89,33 @@ func GetLabelsForIssuesFromTableInTx(ctx context.Context, tx DBTX, labelTable st
 	return result, nil
 }
 
+// getAllLabelsFromTableInTx loads one relation table without sending a complete issue-ID
+// set back to the database. Callers may use it only when their issue query covered the
+// corresponding whole issue table.
+//
+//nolint:gosec // G201: labelTable is "labels" or "wisp_labels" (hardcoded by callers).
+func getAllLabelsFromTableInTx(ctx context.Context, tx DBTX, labelTable string) (map[string][]string, error) {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+		`SELECT issue_id, label FROM %s ORDER BY issue_id, label`, labelTable))
+	if err != nil {
+		return nil, fmt.Errorf("get all labels from %s: %w", labelTable, err)
+	}
+	defer rows.Close()
+
+	result := make(map[string][]string)
+	for rows.Next() {
+		var issueID, label string
+		if err := rows.Scan(&issueID, &label); err != nil {
+			return nil, fmt.Errorf("get all labels: scan: %w", err)
+		}
+		result[issueID] = append(result[issueID], label)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("get all labels: rows: %w", err)
+	}
+	return result, nil
+}
+
 // getLabelsIntoFromTable executes the batched SELECT for a single label table
 // and accumulates results into the provided map.
 //
@@ -152,6 +179,10 @@ func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 		NewEventID(), issueID, types.EventLabelAdded, actor, comment); err != nil {
 		return fmt.Errorf("add label: record event: %w", err)
 	}
+	// Journal the label change as an update (the issue's label set changed).
+	if err := RecordEventInTx(ctx, tx, EventUpdate, issueID); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -178,6 +209,10 @@ func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (id, issue_id, event_type, actor, comment) VALUES (?, ?, ?, ?, ?)`, eventTable),
 		NewEventID(), issueID, types.EventLabelRemoved, actor, comment); err != nil {
 		return fmt.Errorf("remove label: record event: %w", err)
+	}
+	// Journal the label change as an update (the issue's label set changed).
+	if err := RecordEventInTx(ctx, tx, EventUpdate, issueID); err != nil {
+		return err
 	}
 	return nil
 }

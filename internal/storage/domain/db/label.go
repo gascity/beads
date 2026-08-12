@@ -47,12 +47,16 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 	); err != nil {
 		return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: %w", issueID, label, err)
 	}
-	return r.events.Record(ctx, domain.Event{
+	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
 		Type:     types.EventLabelAdded,
 		Actor:    actor,
 		NewValue: label,
-	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable})
+	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
+		return err
+	}
+	// Journal the label change as an update in the same transaction.
+	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID)
 }
 
 func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, actor string, opts domain.LabelOpts) error {
@@ -70,12 +74,16 @@ func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, act
 	); err != nil {
 		return fmt.Errorf("db: LabelSQLRepository.Delete %s/%s: %w", issueID, label, err)
 	}
-	return r.events.Record(ctx, domain.Event{
+	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
 		Type:     types.EventLabelRemoved,
 		Actor:    actor,
 		OldValue: label,
-	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable})
+	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
+		return err
+	}
+	// Journal the label change as an update in the same transaction.
+	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID)
 }
 
 func (r *labelSQLRepositoryImpl) List(ctx context.Context, issueID string, opts domain.LabelOpts) ([]string, error) {

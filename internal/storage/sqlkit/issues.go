@@ -21,6 +21,7 @@ func (s *Store) CreateIssue(ctx context.Context, issue *types.Issue, actor strin
 	if issue == nil {
 		return fmt.Errorf("issue must not be nil")
 	}
+	ctx = s.journalContext(ctx)
 	return s.withMutationTx(ctx, func(tx *sql.Tx) error {
 		// Route to wisps if ephemeral, no-history, or an infra type. Infra types
 		// get marked ephemeral (legacy behavior); TableRouting inside issueops
@@ -49,6 +50,7 @@ func (s *Store) CreateIssues(ctx context.Context, issues []*types.Issue, actor s
 	if len(issues) == 0 {
 		return nil
 	}
+	ctx = s.journalContext(ctx)
 	return s.withMutationTx(ctx, func(tx *sql.Tx) error {
 		_, err := issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, storage.BatchCreateOptions{
 			OrphanHandling:       storage.OrphanAllow,
@@ -115,6 +117,7 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, updates map[string]i
 			return err
 		}
 	}
+	ctx = s.journalContext(ctx)
 
 	// Setting no_history/wisp on a durable issue is an IN-PLACE column write on the
 	// embedded-Dolt reference (the default backend + our oracle): updateIssueInTx routes
@@ -158,6 +161,7 @@ func (s *Store) ReopenIssue(ctx context.Context, id string, reason string, actor
 // DeleteIssue permanently removes an issue. issueops routes wisps internally and
 // recomputes is_blocked for affected neighbors.
 func (s *Store) DeleteIssue(ctx context.Context, id string) error {
+	ctx = s.journalContext(ctx)
 	return s.withMutationTx(ctx, func(tx *sql.Tx) error {
 		return issueops.DeleteIssueInTx(ctx, tx, id)
 	})
@@ -167,6 +171,7 @@ func (s *Store) DeleteIssue(ctx context.Context, id string) error {
 // wisps are ephemeral and never leased, so heartbeating one is ErrNotClaimable;
 // otherwise delegate to issueops.HeartbeatIssueInTx.
 func (s *Store) HeartbeatIssue(ctx context.Context, id, actor string) error {
+	ctx = s.journalContext(ctx)
 	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		if issueops.IsActiveWispInTx(ctx, tx, id) {
 			return fmt.Errorf("%w: %s is ephemeral", storage.ErrNotClaimable, id)
@@ -181,6 +186,7 @@ func (s *Store) HeartbeatIssue(ctx context.Context, id, actor string) error {
 func (s *Store) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, actor string) ([]types.ReclaimedLease, error) {
 	cutoff := time.Now().UTC().Add(-olderThan)
 	var reclaimed []types.ReclaimedLease
+	ctx = s.journalContext(ctx)
 	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		reclaimed, err = issueops.ReclaimExpiredLeasesInTx(ctx, tx, cutoff, actor)

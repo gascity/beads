@@ -17,6 +17,8 @@ func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment stri
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
 	defer func() { _ = tx.Rollback() }()
 
 	if err := issueops.AddCommentEventInTx(ctx, tx, issueID, actor, comment); err != nil {

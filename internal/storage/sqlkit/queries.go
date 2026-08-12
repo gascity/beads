@@ -11,6 +11,13 @@ import (
 // SearchIssues finds issues matching query and filters.
 // Delegates to issueops.SearchIssuesInTx for shared query logic.
 func (s *Store) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	if filter.Lite && filter.SkipWisps && s.dialect.Name() == "postgres" {
+		if s.closed.Load() {
+			return nil, ErrStoreClosed
+		}
+		return issueops.SearchIssuesInTx(ctx, s.db, query, filter)
+	}
+
 	var result []*types.Issue
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error

@@ -15,6 +15,7 @@ import (
 // validates, cycle-checks, and inserts. Running everything in withMutationTx
 // commits the edge and its is_blocked reprojection atomically.
 func (s *Store) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
+	ctx = s.journalContext(ctx)
 	return s.withMutationTx(ctx, func(tx *sql.Tx) error {
 		isCrossPrefix := types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID)
 
@@ -49,6 +50,7 @@ func (s *Store) AddDependency(ctx context.Context, dep *types.Dependency, actor 
 // wisp routing internally, so both source classes collapse to one call. actor
 // is unused (kept to satisfy the storage.Storage signature).
 func (s *Store) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
+	ctx = s.journalContext(ctx)
 	return s.withMutationTx(ctx, func(tx *sql.Tx) error {
 		return issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID)
 	})

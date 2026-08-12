@@ -128,7 +128,10 @@ func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 		}
 		return fmt.Errorf("%w: %s status %s", storage.ErrNotClaimable, id, status)
 	}
-	return nil
+	// A successful heartbeat changes the post-mutation issue state (the lease
+	// expiry), so preserve it as the canonical update operation in the same
+	// transaction. Failed heartbeats above emit nothing.
+	return RecordEventInTx(ctx, tx, EventUpdate, id)
 }
 
 // ReclaimExpiredLeasesInTx reverts in_progress issues whose lease has gone stale
@@ -205,6 +208,11 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, ac
 		if err := RecordFullEventInTable(ctx, tx, "events", r.ID, types.EventLeaseReclaimed, actor,
 			r.PreviousOwner, ""); err != nil {
 			return nil, fmt.Errorf("record reclaim event for %s: %w", r.ID, err)
+		}
+		// Journal the lease reclaim as an update (assignee cleared, status
+		// reverted to open) so a replayer sees the claim released.
+		if err := RecordEventInTx(ctx, tx, EventUpdate, r.ID); err != nil {
+			return nil, err
 		}
 		reclaimed = append(reclaimed, r)
 	}

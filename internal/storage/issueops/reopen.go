@@ -75,5 +75,11 @@ func ReopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string) (*R
 		return nil, fmt.Errorf("recompute is_blocked after reopen for %s: %w", id, err)
 	}
 
+	// Journal the reopen as an update (a status transition). Only reached when a
+	// row was actually reopened (the already-open path returns earlier).
+	if err := RecordEventInTx(ctx, tx, EventUpdate, id); err != nil {
+		return nil, err
+	}
+
 	return &ReopenResult{IsWisp: isWisp}, nil
 }

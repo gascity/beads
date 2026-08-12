@@ -39,12 +39,13 @@ var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
 // The dolthub/driver/v2 handles its own concurrency internally. File-level locking
 // is only used during bd init to protect one-time initialization steps.
 type EmbeddedDoltStore struct {
-	dataDir       string
-	beadsDir      string
-	database      string
-	branch        string
-	credentialKey []byte
-	closed        atomic.Bool
+	dataDir              string
+	beadsDir             string
+	database             string
+	branch               string
+	credentialKey        []byte
+	closed               atomic.Bool
+	eventsJournalEnabled atomic.Bool
 	// readOnly marks a store opened via OpenReadOnly: open-time mutations
 	// (CREATE DATABASE, schema migrations) were skipped and write
 	// transactions are refused (bd-6dnrw.32).
@@ -221,6 +222,8 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		err = fmt.Errorf("embeddeddolt: begin tx: %w", err)
 		return
 	}
+	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+	defer clearJournalScope()
 
 	if fnErr := fn(tx); fnErr != nil {
 		err = errors.Join(fnErr, tx.Rollback())
@@ -237,6 +240,11 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		return
 	}
 	return
+}
+
+// SetEventsJournalEnabled activates the journal for this store instance only.
+func (s *EmbeddedDoltStore) SetEventsJournalEnabled(enabled bool) {
+	s.eventsJournalEnabled.Store(enabled)
 }
 
 func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, error) {
