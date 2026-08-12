@@ -39,6 +39,13 @@ const (
 	SchemaOwnedElsewhere
 )
 
+// ErrNoSchema identifies a database that carries no beads schema, reported by a
+// SchemaOwnedElsewhere open because it may not create one. Callers may use
+// errors.Is to tell "this project was never provisioned" apart from a
+// connection or credential failure — the Dolt counterpart to
+// ErrPostgresExistingSchemaNeedsRepair on the Postgres opener.
+var ErrNoSchema = dolt.ErrNoSchema
+
 // ServerConfig describes how to reach an external dolt sql-server (server mode).
 // It is the programmatic equivalent of the dolt_mode="server" metadata.json
 // settings, for hosts that embed bd's storage layer and manage their own

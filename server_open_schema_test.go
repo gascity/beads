@@ -92,8 +92,11 @@ func TestOpenServerSchemaOwnedElsewhereIssuesNoDDL(t *testing.T) {
 	if err == nil {
 		t.Fatal("SchemaOwnedElsewhere open of an unprovisioned database returned a store; there is nothing to read and it may not create one")
 	}
+	if !errors.Is(err, beads.ErrNoSchema) {
+		t.Fatalf("error = %v, want beads.ErrNoSchema", err)
+	}
 	if !errors.Is(err, dolt.ErrNoSchema) {
-		t.Fatalf("error = %v, want dolt.ErrNoSchema", err)
+		t.Fatalf("beads.ErrNoSchema does not identify the error the dolt store returned; the re-export has drifted")
 	}
 }
 
