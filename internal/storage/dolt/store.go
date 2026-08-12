@@ -261,6 +261,13 @@ type Config struct {
 	// ApplyGatewayCredential, never by hand.
 	Gateway bool
 
+	// ExternalSchemaOwner indicates another process owns this database's schema and
+	// has already provisioned it at its own bd version, so this open must never issue
+	// schema DDL — the drift check only, like ReadOnly, but rows are still writable.
+	// Gateway is the case where that owner is the server itself; this flag is the
+	// general one, set by an embedder that serves databases its provisioner owns.
+	ExternalSchemaOwner bool
+
 	// AutoStart enables transparent server auto-start when connection fails.
 	// When true and the host is localhost, bd will start a dolt sql-server
 	// automatically if one isn't running. Disabled under orchestrator (GT_ROOT set).
@@ -1201,10 +1208,15 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// A gateway server owns the schema: it provisions each project at its deployed bd
 	// version, so a client must never run migrations (DDL) against it. Treat it like
 	// ReadOnly for schema — the forward-drift guard above still protects a stale client
-	// binary.
-	if !cfg.ReadOnly && !cfg.Gateway {
+	// binary. ExternalSchemaOwner says the same thing for an embedder connecting
+	// straight to a database some other process provisioned.
+	if !cfg.ReadOnly && !cfg.Gateway && !cfg.ExternalSchemaOwner {
 		if err := store.initSchema(ctx); err != nil {
 			return nil, fmt.Errorf("failed to initialize schema: %w", err)
+		}
+	} else if cfg.ExternalSchemaOwner {
+		if err := reportExternalSchemaSkew(ctx, db, cfg.Database); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1240,6 +1252,44 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// close above. Must be the last thing before the success return.
 	storeReady = true
 	return store, nil
+}
+
+// ErrNoSchema reports that a database has no beads schema and the open that
+// found it is not allowed to create one (ExternalSchemaOwner).
+var ErrNoSchema = errors.New("no beads schema")
+
+// reportExternalSchemaSkew resolves what an ExternalSchemaOwner open should do
+// about a schema version it may not change. Forward drift (database ahead of
+// the binary) is already refused by the caller; the two remaining cases are not
+// the same thing and must not get the same answer:
+//
+//   - version 0 — there is no beads schema here at all. Nothing is readable,
+//     and this open may not provision one, so it fails now instead of handing
+//     back a store over an empty database whose every query fails as an unknown
+//     table. This is the Dolt sibling of OpenExistingServerPostgres refusing an
+//     absent schema.
+//
+//   - behind the binary — the database is real and readable. A deployment can
+//     hold databases deliberately parked below the newest version (a writer
+//     pinned to an older bd, a database still serving older clients), and those
+//     are exactly the ones an embedder must keep reading. Refusing would make
+//     them unreadable and migrating them is what this mode exists to prevent,
+//     so the open proceeds and says so once. Queries naming columns added after
+//     the database's version will fail; that is a narrower failure than either
+//     alternative, and this line is what makes it diagnosable.
+func reportExternalSchemaSkew(ctx context.Context, db *sql.DB, database string) error {
+	current, err := schema.CurrentVersion(ctx, db)
+	if err != nil {
+		return fmt.Errorf("read schema version of %q: %w", database, err)
+	}
+	if current == 0 {
+		return fmt.Errorf("%w in database %q, and this open does not create one (its schema is owned elsewhere)", ErrNoSchema, database)
+	}
+	if latest := schema.LatestVersion(); current < latest {
+		log.Printf("[schema] %s: database is at v%d, this binary knows v%d; opened without migrating because its schema is owned elsewhere — queries naming newer columns will fail",
+			database, current, latest)
+	}
+	return nil
 }
 
 func shouldPersistResolvedPortFile() bool {
